@@ -21,12 +21,11 @@ class AuthController extends Controller
         ]);
 
         if (Auth::attempt($request->only('email', 'password'))) {
+            $request->session()->regenerate();
             $user = Auth::user();
-            $token = $user->createToken('auth_token')->plainTextToken;
 
             return response()->json([
-                'access_token' => $token,
-                'token_type' => 'Bearer',
+                'message' => 'Login successful',
                 'user' => $user->load(['student', 'teacher', 'parent']),
             ]);
         }
@@ -65,7 +64,10 @@ class AuthController extends Controller
 
     public function logout(Request $request)
     {
-        $request->user()->currentAccessToken()->delete();
+        Auth::guard('web')->logout();
+        $request->session()->invalidate();
+        $request->session()->regenerateToken();
+
         return response()->json(['message' => 'Logged out']);
     }
 
