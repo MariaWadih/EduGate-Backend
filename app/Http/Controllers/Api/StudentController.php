@@ -61,6 +61,7 @@ class StudentController extends Controller
             'email' => 'required|string|email|max:255|unique:users,email,' . $user->id,
             'password' => 'nullable|string|min:8',
             'class_id' => 'required|exists:classes,id',
+            'status' => 'sometimes|string|in:active,unenrolled,alumni,transferred,inactive'
         ]);
 
         return DB::transaction(function () use ($request, $student, $user) {
@@ -73,12 +74,42 @@ class StudentController extends Controller
                 $user->update(['password' => Hash::make($request->password)]);
             }
 
+            $oldStatus = $student->status;
             $student->update([
                 'class_id' => $request->class_id,
+                'status' => $request->status ?? $student->status
             ]);
+
+            // If status changed to non-active, trigger revocation
+            if ($student->status !== 'active' && $oldStatus === 'active') {
+                $this->revokeAccess($student);
+            }
 
             return response()->json($student->load(['user', 'schoolClass']));
         });
+    }
+
+    private function revokeAccess($student)
+    {
+        $user = $student->user;
+        if ($user) {
+            $user->tokens()->delete();
+        }
+
+        // Check parents and revoke their tokens if they have no other active children
+        foreach ($student->parents as $parent) {
+            $hasActiveChildren = $parent->students()
+                ->where('students.id', '!=', $student->id)
+                ->where('status', 'active')
+                ->exists();
+
+            if (!$hasActiveChildren) {
+                $parentUser = $parent->user;
+                if ($parentUser) {
+                    $parentUser->tokens()->delete();
+                }
+            }
+        }
     }
 
     public function destroy($id)
@@ -86,5 +117,25 @@ class StudentController extends Controller
         $student = Student::findOrFail($id);
         $student->user()->delete(); 
         return response()->json(['message' => 'Student deleted successfully']);
+    }
+
+    public function updateStatus(Request $request, $id)
+    {
+        $request->validate([
+            'status' => 'required|string|in:active,unenrolled,alumni,transferred,inactive'
+        ]);
+
+        $student = Student::findOrFail($id);
+        $student->update(['status' => $request->status]);
+
+        // Revoke all tokens if status is not active
+        if ($request->status !== 'active') {
+            $this->revokeAccess($student);
+        }
+
+        return response()->json([
+            'message' => 'Student status updated successfully and access revoked if inactive',
+            'student' => $student
+        ]);
     }
 }

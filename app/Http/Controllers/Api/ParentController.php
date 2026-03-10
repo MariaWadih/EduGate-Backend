@@ -15,7 +15,7 @@ class ParentController extends Controller
 {
     public function index()
     {
-        return UserParent::with(['user', 'students.user'])->get();
+        return UserParent::with(['user', 'students.user', 'students.schoolClass'])->get();
     }
 
     public function store(Request $request)
@@ -44,7 +44,7 @@ class ParentController extends Controller
                 }
             }
 
-            return response()->json($parent->load(['user', 'students.user']), 201);
+            return response()->json($parent->load(['user', 'students.user', 'students.schoolClass']), 201);
         });
     }
 
@@ -77,9 +77,14 @@ class ParentController extends Controller
                     $syncData[$id] = ['relationship_type' => 'guardian'];
                 }
                 $parent->students()->sync($syncData);
+
+                // If parent no longer has active children, revoke access
+                if (!$parent->students()->where('status', 'active')->exists()) {
+                    $user->tokens()->delete();
+                }
             }
 
-            return response()->json($parent->load(['user', 'students.user']));
+            return response()->json($parent->load(['user', 'students.user', 'students.schoolClass']));
         });
     }
 
@@ -95,7 +100,11 @@ class ParentController extends Controller
         $parent = $request->user()->parent;
         if (!$parent) return response()->json([], 404);
 
-        return response()->json($parent->students()->with('user', 'schoolClass')->get());
+        // Filter to only show active children on the portal dashboard
+        return response()->json($parent->students()
+            ->where('students.status', 'active')
+            ->with(['user', 'schoolClass'])
+            ->get());
     }
 
     public function getRecommendations(Request $request)

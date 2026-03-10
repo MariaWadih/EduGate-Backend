@@ -6,7 +6,7 @@ use Illuminate\Database\Eloquent\Model;
 
 class Student extends Model
 {
-    protected $fillable = ['user_id', 'class_id'];
+    protected $fillable = ['user_id', 'class_id', 'status', 'enrolled_at', 'current_academic_year'];
 
     public function user()
     {
@@ -23,6 +23,16 @@ class Student extends Model
         return $this->belongsToMany(UserParent::class, 'parent_student', 'student_id', 'parent_id')
                     ->withPivot('relationship_type')
                     ->withTimestamps();
+    }
+
+    public function enrollments()
+    {
+        return $this->hasMany(StudentEnrollment::class);
+    }
+
+    public function currentEnrollment()
+    {
+        return $this->hasOne(StudentEnrollment::class)->where('status', 'active');
     }
 
     public function attendance()

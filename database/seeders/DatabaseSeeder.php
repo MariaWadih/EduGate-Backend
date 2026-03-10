@@ -38,7 +38,11 @@ class DatabaseSeeder extends Seeder
         $sections = ['A', 'B', 'C'];
         foreach ($grades as $g) {
             foreach ($sections as $s) {
-                $classes[] = SchoolClass::create(['name' => $g, 'section' => $s]);
+                $classes[] = SchoolClass::create([
+                    'name' => $g, 
+                    'section' => $s,
+                    'academic_year' => '2023-2024'
+                ]);
             }
         }
 
@@ -62,7 +66,11 @@ class DatabaseSeeder extends Seeder
                 'password' => Hash::make('password'),
                 'role' => 'teacher',
             ]);
-            $teachers[] = Teacher::create(['user_id' => $user->id]);
+            $teachers[] = Teacher::create([
+                'user_id' => $user->id,
+                'status' => 'active',
+                'joined_at' => Carbon::now()->subMonths(rand(1, 24))->toDateString()
+            ]);
         }
 
         // Ensure every class has subjects
@@ -95,23 +103,40 @@ class DatabaseSeeder extends Seeder
             $students[] = Student::create([
                 'user_id' => $user->id,
                 'class_id' => $classes[array_rand($classes)]->id,
+                'status' => 'active',
+                'enrolled_at' => Carbon::now()->subMonths(rand(1, 12))->toDateString(),
+                'current_academic_year' => '2023-2024'
             ]);
         }
 
         // 6. Create Parents
+        $parentFirstNames = [
+            'David', 'James', 'Michael', 'Robert', 'William', 'Joseph', 'Thomas', 'Christopher', 
+            'Mary', 'Patricia', 'Jennifer', 'Linda', 'Elizabeth', 'Barbara', 'Susan', 'Jessica'
+        ];
+
         foreach ($students as $i => $student) {
             if ($i % 3 === 0) { // One parent for every 3 students
+                $studentNameParts = explode(' ', $student->user->name);
+                $lastName = end($studentNameParts);
+                $firstName = $parentFirstNames[array_rand($parentFirstNames)];
+                $parentFullName = $firstName . ' ' . $lastName;
+
                 $user = User::create([
-                    'name' => "Parent of " . $student->user->name,
-                    'email' => "parent" . $i . "@edugate.com",
+                    'name' => $parentFullName,
+                    'email' => strtolower($firstName . "." . $lastName . $i) . "@edugate.com",
                     'password' => Hash::make('password'),
                     'role' => 'parent',
                 ]);
                 $parent = UserParent::create(['user_id' => $user->id]);
-                $parent->students()->attach($student->id, ['relationship_type' => 'guardian']);
+                $parent->students()->attach($student->id, ['relationship_type' => 'parent']);
                 
+                // Link siblings if they share the same last name or are just the next indices
                 if (isset($students[$i+1])) {
-                    $parent->students()->attach($students[$i+1]->id, ['relationship_type' => 'guardian']);
+                    $parent->students()->attach($students[$i+1]->id, ['relationship_type' => 'parent']);
+                }
+                if (isset($students[$i+2])) {
+                    $parent->students()->attach($students[$i+2]->id, ['relationship_type' => 'parent']);
                 }
             }
         }
@@ -131,13 +156,18 @@ class DatabaseSeeder extends Seeder
             // Grades for each subject assigned to their class
             $classSubjects = $student->schoolClass->subjects;
             foreach ($classSubjects as $subject) {
+                // Some students will fail (score < 50%)
+                $isFailingStudent = $student->id % 7 === 0; // Every 7th student fails
+                $score = $isFailingStudent ? rand(20, 45) : rand(65, 98);
+                
                 Grade::create([
                     'student_id' => $student->id,
                     'subject_id' => $subject->id,
                     'teacher_id' => $subject->pivot->teacher_id,
-                    'score' => rand(65, 98),
+                    'score' => $score,
+                    'max_score' => 100,
                     'term' => 'Term 1',
-                    'comments' => 'Demonstrates good understanding.',
+                    'comments' => $isFailingStudent ? 'Needs significant improvement.' : 'Demonstrates good understanding.',
                 ]);
             }
 

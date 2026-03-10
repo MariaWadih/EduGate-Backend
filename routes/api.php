@@ -1,7 +1,7 @@
 <?php
 
 use App\Http\Controllers\Api\ScheduleController;
-
+use App\Http\Controllers\Api\PromotionController;
 
 
 use Illuminate\Http\Request;
@@ -21,6 +21,7 @@ use App\Http\Controllers\Api\SubjectController;
 use App\Http\Controllers\Api\StudentController;
 use App\Http\Controllers\Api\AcademicController;
 use App\Http\Controllers\Api\FeedbackController;
+use App\Http\Controllers\Api\MaterialController;
 
 
 // Public routes
@@ -44,11 +45,13 @@ Route::middleware('auth:sanctum')->group(function () {
     // Admin Only
     Route::middleware('role:admin')->group(function () {
         Route::post('/users/register', [AuthController::class, 'register']);
-        Route::apiResource('/classes', ClassController::class);
+        Route::apiResource('/classes', ClassController::class)->except(['show']);
         Route::apiResource('/subjects', SubjectController::class);
         Route::apiResource('/teachers', TeacherController::class);
         Route::apiResource('/parents', ParentController::class);
         Route::apiResource('/students', StudentController::class);
+        Route::patch('/students/{id}/status', [StudentController::class, 'updateStatus']);
+        Route::patch('/teachers/{id}/status', [TeacherController::class, 'updateStatus']);
         Route::get('/academic-hierarchy', [AcademicController::class, 'index']);
         Route::post('/academic/grade-subject', [AcademicController::class, 'storeGradeSubject']);
         Route::post('/academic/grade', [AcademicController::class, 'storeGrade']);
@@ -58,6 +61,14 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::delete('/academic/grade-subject', [AcademicController::class, 'destroyGradeSubject']);
         Route::put('/academic/grade', [AcademicController::class, 'updateGrade']);
         Route::put('/academic/section/{id}', [AcademicController::class, 'updateSection']);
+
+        // Student Promotions
+        Route::get('/promotions/candidates', [PromotionController::class, 'getCandidates']);
+        Route::post('/promotions/promote', [PromotionController::class, 'promoteStudents']);
+        Route::post('/promotions/bulk-promote-class', [PromotionController::class, 'bulkPromoteClass']);
+        Route::post('/promotions/initialize-classes', [PromotionController::class, 'initializeTargetClasses']);
+        Route::get('/promotions/student/{studentId}/history', [PromotionController::class, 'getStudentHistory']);
+        Route::get('/promotions/year/{academicYear}/statistics', [PromotionController::class, 'getYearStatistics']);
         Route::put('/academic/subject/{id}', [AcademicController::class, 'updateSubject']);
         Route::apiResource('/schedules', ScheduleController::class);
     });
@@ -68,23 +79,41 @@ Route::middleware('auth:sanctum')->group(function () {
 
 
 
+    // Student & Parent (Shared stuff) - Specific paths first to avoid parameter collision
+    Route::middleware('role:student,parent,teacher,admin')->group(function () {
+        Route::get('/homework/my', [HomeworkController::class, 'myHomework']);
+        Route::post('/homework/submit', [HomeworkController::class, 'submitHomework']);
+        Route::get('/homework/file/download', [HomeworkController::class, 'downloadFile']);
+        Route::get('/attendance/my', [AttendanceController::class, 'myAttendance']);
+        Route::get('/grades/my', [GradeController::class, 'myGrades']);
+        Route::get('/announcements', [AnnouncementController::class, 'index']);
+        Route::get('/exams', [ExamController::class, 'index']);
+        Route::get('/exams/{id}', [ExamController::class, 'show']);
+        Route::post('/exams/{id}/submit', [ExamController::class, 'submit']);
+        Route::get('/materials', [MaterialController::class, 'index']);
+        Route::get('/materials/download', [MaterialController::class, 'download']);
+        Route::get('/materials/download-all', [MaterialController::class, 'downloadAllByCourse']);
+    });
+
     // Admin & Teacher
     Route::middleware('role:admin,teacher')->group(function () {
         Route::get('/classes/{id}', [ClassController::class, 'show']);
         Route::get('/teacher/classes', [ClassController::class, 'teacherClasses']);
         Route::post('/attendance', [AttendanceController::class, 'store']);
+        Route::get('/attendance/check', [AttendanceController::class, 'getByClassDate']);
+        Route::get('/grades', [GradeController::class, 'index']);
         Route::post('/grades', [GradeController::class, 'store']);
         Route::apiResource('/homework', HomeworkController::class);
-        Route::apiResource('/exams', ExamController::class);
+        Route::get('/homework/{id}/submissions', [HomeworkController::class, 'getSubmissions']);
+        Route::post('/homework/grade', [HomeworkController::class, 'gradeSubmission']);
+        Route::post('/exams', [ExamController::class, 'store']);
+        Route::put('/exams/{exam}', [ExamController::class, 'update']);
+        Route::delete('/exams/{exam}', [ExamController::class, 'destroy']);
+        Route::get('/exams/{id}/submissions', [ExamController::class, 'getSubmissions']);
+        Route::post('/exams/grade', [ExamController::class, 'gradeSubmission']);
         Route::post('/announcements', [AnnouncementController::class, 'store']);
-    });
-
-    // Student & Parent
-    Route::middleware('role:student,parent,teacher,admin')->group(function () {
-        Route::get('/attendance/my', [AttendanceController::class, 'myAttendance']);
-        Route::get('/grades/my', [GradeController::class, 'myGrades']);
-        Route::get('/homework/my', [HomeworkController::class, 'myHomework']);
-        Route::get('/announcements', [AnnouncementController::class, 'index']);
+        Route::post('/materials', [MaterialController::class, 'store']);
+        Route::delete('/materials/{id}', [MaterialController::class, 'destroy']);
     });
 
     // Parent Specific
@@ -102,6 +131,9 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/students', [StudentController::class, 'index'])->middleware('role:admin');
         Route::get('/parents', [ParentController::class, 'index'])->middleware('role:admin');
         Route::get('/teacher/overview', [AnalyticsController::class, 'teacherOverview'])->middleware('role:teacher');
+        Route::get('/student/overview', [AnalyticsController::class, 'studentOverview'])->middleware('role:student');
+        Route::get('/parent/overview', [AnalyticsController::class, 'parentOverview'])->middleware('role:parent');
+        Route::get('/admin/history', [AnalyticsController::class, 'getHistoricalRecords'])->middleware('role:admin');
     });
 
     // Insights

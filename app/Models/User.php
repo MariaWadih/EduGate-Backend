@@ -59,4 +59,30 @@ class User extends Authenticatable
     {
         return $this->hasMany(Announcement::class);
     }
+
+    /**
+     * Check if the user is active based on their profile status.
+     * Admin and Parents are considered active by default in this context.
+     */
+    public function isActive(): bool
+    {
+        if ($this->isAdmin()) {
+            return true;
+        }
+
+        if ($this->isParent()) {
+            // Parent is active if they have at least one active student
+            return $this->parent && $this->parent->students()->where('students.status', 'active')->exists();
+        }
+
+        if ($this->isStudent()) {
+            return $this->student && $this->student->status === 'active';
+        }
+
+        if ($this->isTeacher()) {
+            return $this->teacher && $this->teacher->status === 'active';
+        }
+
+        return false;
+    }
 }

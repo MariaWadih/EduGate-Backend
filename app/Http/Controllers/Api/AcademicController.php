@@ -51,12 +51,25 @@ class AcademicController extends Controller
 
     public function storeGrade(Request $request)
     {
-        $request->validate(['name' => 'required|string|unique:classes,name']);
+        $request->validate([
+            'name' => 'required|string',
+            'academic_year' => 'required|string'
+        ]);
         
+        // Check if grade with same name and year already exists
+        $exists = SchoolClass::where('name', $request->name)
+            ->where('academic_year', $request->academic_year)
+            ->exists();
+
+        if ($exists) {
+            return response()->json(['message' => 'Grade already exists for this academic year'], 400);
+        }
+
         // Create first section of the grade
         $class = SchoolClass::create([
             'name' => $request->name,
-            'section' => 'A'
+            'section' => 'A',
+            'academic_year' => $request->academic_year
         ]);
 
         return response()->json(['message' => 'Grade created successfully', 'grade' => $class], 201);
@@ -66,12 +79,14 @@ class AcademicController extends Controller
     {
         $request->validate([
             'grade_name' => 'required|string',
-            'section' => 'required|string'
+            'section' => 'required|string',
+            'academic_year' => 'required|string'
         ]);
 
         $class = SchoolClass::create([
             'name' => $request->grade_name,
-            'section' => $request->section
+            'section' => $request->section,
+            'academic_year' => $request->academic_year
         ]);
 
         return response()->json(['message' => 'Section added successfully', 'section' => $class], 201);
@@ -135,11 +150,16 @@ class AcademicController extends Controller
 
 
 
-    public function index()
+    public function index(Request $request)
 
     {
-        // Group classes by grade name
-        $classes = SchoolClass::with(['students.user', 'subjects'])->get();
+        $query = SchoolClass::with(['students.user', 'subjects']);
+
+        if ($request->has('academic_year') && $request->academic_year !== 'All') {
+            $query->where('academic_year', $request->academic_year);
+        }
+
+        $classes = $query->get();
 
         
         $hierarchy = $classes->groupBy('name')->map(function ($sections, $gradeName) {

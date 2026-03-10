@@ -2,14 +2,24 @@
 
 namespace App\Models;
 
+use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 
-class Homework extends Model
+class Material extends Model
 {
-    protected $table = 'homeworks';
-    protected $fillable = ['class_id', 'subject_id', 'teacher_id', 'title', 'description', 'due_date', 'file_path', 'file_name'];
-    protected $casts = [
-        'due_date' => 'date',
+    use HasFactory;
+
+    protected $fillable = [
+        'class_id',
+        'subject_id',
+        'teacher_id',
+        'section',
+        'sub_section',
+        'title',
+        'description',
+        'file_path',
+        'file_name',
+        'file_type',
     ];
 
     public function schoolClass()
@@ -25,10 +35,5 @@ class Homework extends Model
     public function teacher()
     {
         return $this->belongsTo(Teacher::class);
-    }
-
-    public function submissions()
-    {
-        return $this->hasMany(HomeworkSubmission::class);
     }
 }

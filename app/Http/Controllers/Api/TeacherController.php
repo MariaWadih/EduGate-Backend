@@ -35,9 +35,15 @@ class TeacherController extends Controller
                 'role' => 'teacher',
             ]);
 
-            $teacher = Teacher::create(['user_id' => $user->id]);
+            $teacher = Teacher::create([
+                'user_id' => $user->id,
+                'status' => 'active',
+                'joined_at' => now()
+            ]);
 
             if ($request->has('assignments')) {
+                $this->validateAssignments($teacher, $request->assignments);
+                
                 foreach ($request->assignments as $assignment) {
                     \App\Models\ClassSubjectTeacher::create([
                         'teacher_id' => $teacher->id,
@@ -63,6 +69,7 @@ class TeacherController extends Controller
             'assignments' => 'nullable|array',
             'assignments.*.class_id' => 'required|exists:classes,id',
             'assignments.*.subject_id' => 'required|exists:subjects,id',
+            'status' => 'sometimes|string|in:active,inactive,former'
         ]);
 
         return DB::transaction(function () use ($request, $teacher, $user) {
@@ -75,17 +82,28 @@ class TeacherController extends Controller
                 $user->update(['password' => Hash::make($request->password)]);
             }
 
-            // Sync assignments: Simplest way is to delete and recreate for this demo
-            \App\Models\ClassSubjectTeacher::where('teacher_id', $teacher->id)->delete();
-            
-            if ($request->has('assignments')) {
-                foreach ($request->assignments as $assignment) {
-                    \App\Models\ClassSubjectTeacher::create([
-                        'teacher_id' => $teacher->id,
-                        'class_id' => $assignment['class_id'],
-                        'subject_id' => $assignment['subject_id'],
-                    ]);
+            $oldStatus = $teacher->status;
+            $newStatus = $request->status ?? $teacher->status;
+
+            // If status changed to non-active, trigger revocation and clear assignments
+            if ($newStatus !== 'active' && $oldStatus === 'active') {
+                \App\Models\ClassSubjectTeacher::where('teacher_id', $teacher->id)->delete();
+                $user->tokens()->delete();
+                $teacher->update(['status' => $newStatus]);
+            } else {
+                // Update basic info and sync assignments if active
+                if ($request->has('assignments')) {
+                    $this->validateAssignments($teacher, $request->assignments);
+                    \App\Models\ClassSubjectTeacher::where('teacher_id', $teacher->id)->delete();
+                    foreach ($request->assignments as $assignment) {
+                        \App\Models\ClassSubjectTeacher::create([
+                            'teacher_id' => $teacher->id,
+                            'class_id' => $assignment['class_id'],
+                            'subject_id' => $assignment['subject_id'],
+                        ]);
+                    }
                 }
+                $teacher->update(['status' => $newStatus]);
             }
 
             return response()->json($teacher->load(['user', 'assignments.schoolClass', 'assignments.subject']));
@@ -102,5 +120,102 @@ class TeacherController extends Controller
         $teacher = Teacher::findOrFail($id);
         $teacher->user()->delete(); 
         return response()->json(['message' => 'Teacher deleted successfully']);
+    }
+
+    public function updateStatus(Request $request, $id)
+    {
+        $request->validate([
+            'status' => 'required|string|in:active,inactive,former'
+        ]);
+
+        $teacher = Teacher::findOrFail($id);
+        
+        // If setting to inactive/former, remove all current assignments
+        if ($request->status !== 'active') {
+            \App\Models\ClassSubjectTeacher::where('teacher_id', $teacher->id)->delete();
+            $teacher->user->tokens()->delete();
+        }
+        
+        $teacher->update(['status' => $request->status]);
+
+        return response()->json([
+            'message' => 'Teacher status updated successfully and access revoked if inactive',
+            'teacher' => $teacher->load(['user', 'assignments.schoolClass', 'assignments.subject'])
+        ]);
+    }
+
+    /**
+     * Validate teacher assignments for business rules:
+     * 1. Teacher must be active
+     * 2. No schedule conflicts (same time slots)
+     * 3. Assignments are year-specific
+     */
+    private function validateAssignments($teacher, $assignments)
+    {
+        // Rule 1: Teacher must be active to receive assignments
+        if ($teacher->status === 'inactive') {
+            throw new \Exception('Cannot assign courses to an inactive teacher. Please activate the teacher first.');
+        }
+
+        // Rule 2: Check for schedule conflicts
+        $classIds = array_column($assignments, 'class_id');
+        $classes = \App\Models\SchoolClass::whereIn('id', $classIds)
+            ->with('schedules')
+            ->get()
+            ->keyBy('id');
+
+        $timeSlots = [];
+        $assignedCourses = [];
+        foreach ($assignments as $assignment) {
+            // Rule 2.5: Prevent duplicate assignments in the same request
+            $courseKey = $assignment['class_id'] . '_' . $assignment['subject_id'];
+            if (isset($assignedCourses[$courseKey])) {
+                throw new \Exception('Duplicate assignment detected in your request for the same class and subject.');
+            }
+            $assignedCourses[$courseKey] = true;
+
+            // Rule 3: Check if the course is already assigned to another teacher
+            $existingAssignment = \App\Models\ClassSubjectTeacher::where('class_id', $assignment['class_id'])
+                ->where('subject_id', $assignment['subject_id'])
+                ->where('teacher_id', '!=', $teacher->id)
+                ->with('teacher.user')
+                ->first();
+
+            if ($existingAssignment) {
+                $className = \App\Models\SchoolClass::find($assignment['class_id'])->name;
+                $subjectName = \App\Models\Subject::find($assignment['subject_id'])->name;
+                $otherTeacherName = $existingAssignment->teacher->user->name;
+
+                throw new \Exception(
+                    "The course '{$subjectName}' for class '{$className}' is already assigned to teacher '{$otherTeacherName}'. " .
+                    "A course can only have one primary teacher per class."
+                );
+            }
+
+            $class = $classes->get($assignment['class_id']);
+            
+            if ($class && $class->schedules) {
+                foreach ($class->schedules as $schedule) {
+                    // Check if this subject is in the schedule
+                    if ($schedule->subject_id == $assignment['subject_id']) {
+                        $timeKey = $schedule->day_of_week . '_' . $schedule->start_time;
+                        
+                        if (isset($timeSlots[$timeKey])) {
+                            throw new \Exception(
+                                "Schedule conflict detected: Teacher cannot teach two courses at the same time (" .
+                                $schedule->day_of_week . " at " . $schedule->start_time . ")"
+                            );
+                        }
+                        
+                        $timeSlots[$timeKey] = [
+                            'class' => $class->name . ' ' . $class->section,
+                            'subject_id' => $assignment['subject_id']
+                        ];
+                    }
+                }
+            }
+        }
+
+        return true;
     }
 }

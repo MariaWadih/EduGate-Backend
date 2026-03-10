@@ -18,7 +18,7 @@ class ClassController extends Controller
 
     public function show($id)
     {
-        return response()->json(SchoolClass::with(['students.user', 'subjects'])->findOrFail($id));
+        return response()->json(SchoolClass::with(['students.user', 'students.parents.user', 'subjects'])->findOrFail($id));
     }
 
     public function teacherClasses(Request $request)

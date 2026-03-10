@@ -15,6 +15,7 @@ use App\Models\User;
 use App\Models\UserParent;
 use App\Models\Announcement;
 use App\Models\SchoolClass;
+use App\Models\StudentPromotion;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Carbon\Carbon;
@@ -98,17 +99,40 @@ class AnalyticsController extends Controller
             }])
             ->get();
 
+        // Add courses (subjects) with teachers
+        $courses = \App\Models\ClassSubjectTeacher::where('class_id', $student->class_id)
+            ->with(['subject', 'teacher.user'])
+            ->get()
+            ->map(function($cst) {
+                return [
+                    'id' => $cst->subject ? $cst->subject->id : null,
+                    'name' => $cst->subject ? $cst->subject->name : 'Unknown Subject',
+                    'code' => $cst->subject ? $cst->subject->code : 'N/A',
+                    'teacher' => $cst->teacher
+                ];
+            });
+
+        // Real class schedules
+        $schedules = \App\Models\Schedule::where('class_id', $student->class_id)
+            ->with('subject')
+            ->get();
+
+        $currentEnrollment = $student->currentEnrollment;
+        if (!$currentEnrollment) return response()->json(['error' => 'No active enrollment found'], 404);
+
         $data = [
             'metrics' => [
-                'attendance_rate' => $this->getStudentAttendanceRate($student->id),
-                'gpa' => $this->getStudentGPA($student->id),
+                'attendance_rate' => $this->getStudentAttendanceRate($student->id, $currentEnrollment->id),
+                'gpa' => $this->getStudentGPA($student->id, $currentEnrollment->id),
             ],
-            'attendance_trend' => $this->getStudentAttendanceTrend($student->id),
-            'grades' => Grade::where('student_id', $student->id)->with('subject')->latest()->take(6)->get(),
+            'attendance_trend' => $this->getStudentAttendanceTrend($student->id, $currentEnrollment->id),
+            'grades' => Grade::where('student_id', $student->id)->where('enrollment_id', $currentEnrollment->id)->with('subject')->latest()->get(),
             'exams' => $exams,
             'assignments' => $assignments,
+            'schedules' => $schedules,
             'insights' => Insight::where('related_entity_id', $student->id)->where('scope', 'student')->get(),
-            'provenance' => ['attendance_records', 'grades', 'insights', 'exams', 'homeworks']
+            'courses' => $courses,
+            'provenance' => ['attendance_records', 'grades', 'insights', 'exams', 'homeworks', 'subjects', 'schedules']
         ];
 
         return response()->json($data);
@@ -121,23 +145,24 @@ class AnalyticsController extends Controller
 
         if (!$parent) return response()->json(['error' => 'Parent profile not found'], 404);
 
-        $students = $parent->students;
-        if ($students->isEmpty()) return response()->json(['error' => 'No linked children'], 404);
+        $students = $parent->students()->where('students.status', 'active')->get();
+        if ($students->isEmpty()) return response()->json(['error' => 'No active linked children'], 403);
 
         $targetStudentId = $studentId ?: $students->first()->id;
 
-        // Verify ownership
+        // Verify ownership and activity
         if (!$students->pluck('id')->contains($targetStudentId)) {
-            return response()->json(['error' => 'Unauthorized access to student data'], 403);
+            return response()->json(['error' => 'Unauthorized or student is inactive'], 403);
         }
 
-        $student = Student::with(['user', 'schoolClass', 'grades.subject', 'examResults.exam'])->find($targetStudentId);
+        $student = Student::with(['user', 'schoolClass', 'currentEnrollment', 'grades.subject', 'examResults.exam'])->find($targetStudentId);
+        $currentEnrollment = $student->currentEnrollment;
 
         $data = [
             'current_student' => $student,
             'metrics' => [
-                'attendance_rate' => $this->getStudentAttendanceRate($targetStudentId),
-                'gpa' => $this->getStudentGPA($targetStudentId),
+                'attendance_rate' => $this->getStudentAttendanceRate($targetStudentId, $currentEnrollment?->id),
+                'gpa' => $this->getStudentGPA($targetStudentId, $currentEnrollment?->id),
             ],
             'exams' => \App\Models\Exam::where('class_id', $student->class_id)->where('date', '>=', now())->get(),
             'announcements' => Announcement::latest()->take(3)->get(),
@@ -172,23 +197,37 @@ class AnalyticsController extends Controller
             });
     }
 
-    protected function getStudentAttendanceRate($studentId)
+    protected function getStudentAttendanceRate($studentId, $enrollmentId = null)
     {
-        $total = AttendanceRecord::where('student_id', $studentId)->count();
+        $query = AttendanceRecord::where('student_id', $studentId);
+        if ($enrollmentId) {
+            $query->where('enrollment_id', $enrollmentId);
+        }
+        
+        $total = $query->count();
         if ($total == 0) return 0;
-        $present = AttendanceRecord::where('student_id', $studentId)->where('status', 'present')->count();
+        
+        $present = (clone $query)->where('status', 'present')->count();
         return round(($present / $total) * 100, 2);
     }
 
-    protected function getStudentGPA($studentId)
+    protected function getStudentGPA($studentId, $enrollmentId = null)
     {
-        return Grade::where('student_id', $studentId)->avg('score') ?: 0;
+        $query = Grade::where('student_id', $studentId);
+        if ($enrollmentId) {
+            $query->where('enrollment_id', $enrollmentId);
+        }
+        return $query->avg('score') ?: 0;
     }
 
-    protected function getStudentAttendanceTrend($studentId)
+    protected function getStudentAttendanceTrend($studentId, $enrollmentId = null)
     {
-        return AttendanceRecord::where('student_id', $studentId)
-            ->orderBy('date', 'desc')
+        $query = AttendanceRecord::where('student_id', $studentId);
+        if ($enrollmentId) {
+            $query->where('enrollment_id', $enrollmentId);
+        }
+        
+        return $query->orderBy('date', 'desc')
             ->take(10)
             ->get(['date', 'status']);
     }
@@ -289,5 +328,58 @@ class AnalyticsController extends Controller
                 'time' => $f->created_at->diffForHumans()
             ];
         });
+    }
+
+    public function getHistoricalRecords(Request $request)
+    {
+        // Get all unique academic years from promotions to populate filters
+        $availableYears = StudentPromotion::select('from_academic_year')
+            ->distinct()
+            ->pluck('from_academic_year')
+            ->toArray();
+            
+        if (empty($availableYears)) {
+            $availableYears = ['2023-2024', '2024-2025'];
+        }
+        
+        $studentHistory = Student::with(['user', 'schoolClass', 'parents.user'])
+            ->whereIn('status', ['active', 'unenrolled', 'alumni'])
+            ->get()
+            ->groupBy('status');
+
+        $teacherHistory = Teacher::with(['user'])
+            ->get()
+            ->groupBy('status');
+
+        $promotionLogs = StudentPromotion::with(['student.user', 'fromClass', 'toClass'])
+            ->latest()
+            ->get();
+
+        $promotionStats = StudentPromotion::select('from_academic_year', 'status', DB::raw('count(*) as count'))
+            ->groupBy('from_academic_year', 'status')
+            ->get()
+            ->groupBy('from_academic_year');
+
+        $data = [
+            'overview' => [
+                'total_alumni' => Student::where('status', 'alumni')->count(),
+                'total_left_students' => Student::where('status', 'unenrolled')->count(),
+                'total_left_teachers' => Teacher::where('status', 'inactive')->count(),
+            ],
+            'students' => [
+                'active' => $studentHistory->get('active', []),
+                'unenrolled' => $studentHistory->get('unenrolled', []),
+                'alumni' => $studentHistory->get('alumni', []),
+            ],
+            'teachers' => [
+                'active' => $teacherHistory->get('active', []),
+                'inactive' => $teacherHistory->get('inactive', []),
+            ],
+            'promotions' => $promotionStats,
+            'promotion_logs' => $promotionLogs,
+            'years' => array_values(array_unique(array_merge($availableYears, ['2023-2024', '2024-2025'])))
+        ];
+
+        return response()->json($data);
     }
 }

@@ -25,6 +25,15 @@ class AuthController extends Controller
         }
 
         $user = User::where('email', $request->email)->firstOrFail();
+        
+        if (!$user->isActive()) {
+            Auth::logout();
+            return response()->json([
+                'message' => 'Your account is currently inactive. Please contact the administrator.',
+                'status' => 'inactive'
+            ], 403);
+        }
+
         $token = $user->createToken('auth_token')->plainTextToken;
 
         return response()->json([
