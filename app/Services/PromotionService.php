@@ -22,6 +22,11 @@ class PromotionService
                 throw new \Exception("Only active students can be promoted. Current status: {$student->status}");
             }
 
+            // 1b. Safety Check: If status is 'promoted', they cannot stay in the same class
+            if ($data['status'] === 'promoted' && isset($data['from_class_id']) && $data['to_class_id'] == $data['from_class_id']) {
+                throw new \Exception("Student cannot be 'promoted' to the same class. Please select the next grade/section.");
+            }
+
             // 2. Clear current active enrollment for the current year
             $currentEnrollment = StudentEnrollment::where('student_id', $studentId)
                 ->where('academic_year', $data['from_academic_year'])
@@ -34,6 +39,10 @@ class PromotionService
                     'notes' => $data['remarks'] ?? null
                 ]);
             }
+
+            // Resolve academic year IDs from strings if they aren't provided
+            $fromYearId = $data['from_academic_year_id'] ?? \App\Models\AcademicYear::where('name', $data['from_academic_year'])->value('id');
+            $toYearId = $data['to_academic_year_id'] ?? \App\Models\AcademicYear::where('name', $data['to_academic_year'])->value('id');
 
             // 3. Handle terminal statuses (Graduated, Transferred)
             if (in_array($data['status'], ['graduated', 'transferred'])) {
@@ -69,6 +78,7 @@ class PromotionService
                 'student_id' => $student->id,
                 'class_id' => $data['to_class_id'],
                 'academic_year' => $data['to_academic_year'],
+                'academic_year_id' => $toYearId,
                 'status' => 'active',
                 'enrollment_date' => now(),
                 'notes' => 'Auto-generated through promotion'

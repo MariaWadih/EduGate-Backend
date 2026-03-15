@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\Api\ScheduleController;
 use App\Http\Controllers\Api\PromotionController;
+use App\Http\Controllers\Api\AcademicYearController;
 
 
 use Illuminate\Http\Request;
@@ -36,6 +37,9 @@ Route::get('/health', function () {
     ]);
 });
 
+// Public — active academic year (needed before login for display)
+Route::get('/academic-years/active', [AcademicYearController::class, 'active']);
+
 // Protected routes
 Route::middleware('auth:sanctum')->group(function () {
     Route::post('/logout', [AuthController::class, 'logout']);
@@ -69,8 +73,15 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/promotions/initialize-classes', [PromotionController::class, 'initializeTargetClasses']);
         Route::get('/promotions/student/{studentId}/history', [PromotionController::class, 'getStudentHistory']);
         Route::get('/promotions/year/{academicYear}/statistics', [PromotionController::class, 'getYearStatistics']);
+        Route::get('/promotions/classes-for-year', [PromotionController::class, 'getClassesForYear']);
         Route::put('/academic/subject/{id}', [AcademicController::class, 'updateSubject']);
         Route::apiResource('/schedules', ScheduleController::class);
+
+        // Academic Years Management
+        Route::get('/academic-years', [AcademicYearController::class, 'index']);
+        Route::post('/academic-years', [AcademicYearController::class, 'store']);
+        Route::put('/academic-years/{id}', [AcademicYearController::class, 'update']);
+        Route::post('/academic-years/{id}/activate', [AcademicYearController::class, 'activate']);
     });
 
 

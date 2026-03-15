@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\AcademicYear;
 use App\Models\SchoolClass;
 use App\Models\Subject;
 use App\Models\Teacher;
@@ -52,13 +53,15 @@ class AcademicController extends Controller
     public function storeGrade(Request $request)
     {
         $request->validate([
-            'name' => 'required|string',
-            'academic_year' => 'required|string'
+            'name'             => 'required|string',
+            'academic_year_id' => 'required|exists:academic_years,id'
         ]);
-        
+
+        $yearRecord = AcademicYear::findOrFail($request->academic_year_id);
+
         // Check if grade with same name and year already exists
         $exists = SchoolClass::where('name', $request->name)
-            ->where('academic_year', $request->academic_year)
+            ->where('academic_year_id', $request->academic_year_id)
             ->exists();
 
         if ($exists) {
@@ -67,9 +70,10 @@ class AcademicController extends Controller
 
         // Create first section of the grade
         $class = SchoolClass::create([
-            'name' => $request->name,
-            'section' => 'A',
-            'academic_year' => $request->academic_year
+            'name'             => $request->name,
+            'section'          => 'A',
+            'academic_year'    => $yearRecord->name,   // keep string for compatibility
+            'academic_year_id' => $request->academic_year_id,
         ]);
 
         return response()->json(['message' => 'Grade created successfully', 'grade' => $class], 201);
@@ -78,15 +82,18 @@ class AcademicController extends Controller
     public function storeSection(Request $request)
     {
         $request->validate([
-            'grade_name' => 'required|string',
-            'section' => 'required|string',
-            'academic_year' => 'required|string'
+            'grade_name'       => 'required|string',
+            'section'          => 'required|string',
+            'academic_year_id' => 'required|exists:academic_years,id'
         ]);
 
+        $yearRecord = AcademicYear::findOrFail($request->academic_year_id);
+
         $class = SchoolClass::create([
-            'name' => $request->grade_name,
-            'section' => $request->section,
-            'academic_year' => $request->academic_year
+            'name'             => $request->grade_name,
+            'section'          => $request->section,
+            'academic_year'    => $yearRecord->name,
+            'academic_year_id' => $request->academic_year_id,
         ]);
 
         return response()->json(['message' => 'Section added successfully', 'section' => $class], 201);
@@ -151,49 +158,59 @@ class AcademicController extends Controller
 
 
     public function index(Request $request)
-
     {
-        $query = SchoolClass::with(['students.user', 'subjects']);
+        // Resolve which academic year to show
+        $yearId = $request->academic_year_id ?? null;
 
-        if ($request->has('academic_year') && $request->academic_year !== 'All') {
-            $query->where('academic_year', $request->academic_year);
+        // Legacy: support string-based year filter from older frontend calls
+        if (!$yearId && $request->has('academic_year') && $request->academic_year !== 'All') {
+            $found = AcademicYear::where('name', $request->academic_year)->first();
+            $yearId = $found?->id;
+        }
+
+        // Default to the active year
+        if (!$yearId) {
+            $yearId = AcademicYear::where('is_active', true)->value('id');
+        }
+
+        $query = SchoolClass::with(['students.user', 'subjects', 'academicYear']);
+
+        if ($yearId) {
+            $query->where('academic_year_id', $yearId);
         }
 
         $classes = $query->get();
 
-        
         $hierarchy = $classes->groupBy('name')->map(function ($sections, $gradeName) {
-            // Get unique subjects for this grade across all sections
             $subjects = $sections->flatMap->subjects->unique('id')->values();
-            
+
             return [
-                'name' => $gradeName,
+                'name'     => $gradeName,
                 'sections' => $sections->map(function ($section) {
                     return [
-                        'id' => $section->id,
-                        'name' => $section->section,
+                        'id'             => $section->id,
+                        'name'           => $section->section,
                         'students_count' => $section->students->count(),
                         'subjects_count' => $section->subjects->count(),
-                        'students' => $section->students->map(function ($student) {
+                        'students'       => $section->students->map(function ($student) {
                             return [
-                                'id' => $student->id,
-                                'name' => $student->user->name,
+                                'id'    => $student->id,
+                                'name'  => $student->user->name,
                                 'email' => $student->user->email,
                             ];
                         }),
-                        'subjects' => $section->subjects->map(function ($subject) {
+                        'subjects'       => $section->subjects->map(function ($subject) {
                             return [
-                                'id' => $subject->id,
+                                'id'   => $subject->id,
                                 'name' => $subject->name,
                             ];
                         }),
-                        // In a real app, we'd have a schedule table. For now, we'll mock it if needed.
-                        'schedule' => $this->getMockSchedule($section->section),
+                        'schedule'       => $this->getMockSchedule($section->section),
                     ];
                 }),
                 'subjects' => $subjects->map(function ($subject) {
                     return [
-                        'id' => $subject->id,
+                        'id'   => $subject->id,
                         'name' => $subject->name,
                         'code' => $subject->code ?? (strtoupper(substr($subject->name, 0, 2)) . rand(100, 999)),
                     ];

@@ -15,18 +15,33 @@ class AnnouncementController extends Controller
         $query = Announcement::with(['user', 'targetClass']);
 
         if ($user->role === 'student') {
-            $student = $user->student;
-            $query->where(function($q) use ($student) {
-                $q->where('target_role', 'student')
-                  ->orWhere('target_role', 'all');
-            })->where(function($q) use ($student) {
-                $q->where('target_class_id', $student->class_id)
-                  ->orWhereNull('target_class_id');
+            $classId = $user->student ? $user->student->class_id : null;
+            
+            $query->where(function($q) use ($classId) {
+                // Students see 'everyone' messages and 'student body' messages
+                $q->whereIn('target_role', ['all', 'student']);
+                
+                // They also see messages specifically for their academic section (class)
+                if ($classId) {
+                    $q->orWhere(function($sq) use ($classId) {
+                        $sq->where('target_role', 'class')
+                           ->where('target_class_id', $classId);
+                    });
+                }
             });
+        } elseif ($user->role === 'teacher') {
+            // Teachers see everything except parent-specific messages
+            $query->whereIn('target_role', ['all', 'teacher', 'student', 'class']);
         } elseif ($user->role === 'parent') {
-            $studentIds = $user->parent->students->pluck('id');
-            // Simplified for now, just show shared/all
-            $query->whereIn('target_role', ['all', 'student', 'parent']);
+            $studentClassIds = $user->parent->students->pluck('class_id')->filter()->unique();
+            
+            $query->where(function($q) use ($studentClassIds) {
+                $q->whereIn('target_role', ['all', 'student', 'parent'])
+                  ->orWhere(function($sq) use ($studentClassIds) {
+                      $sq->where('target_role', 'class')
+                         ->whereIn('target_class_id', $studentClassIds);
+                  });
+            });
         }
 
         return response()->json($query->latest()->get());

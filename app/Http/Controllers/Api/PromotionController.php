@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\Student;
 use App\Models\SchoolClass;
+use App\Models\AcademicYear;
 use App\Models\StudentPromotion;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -65,11 +66,11 @@ class PromotionController extends Controller
                 }
             }
 
-            $currentGradeName = $student->schoolClass->name; // e.g. "Grade 9"
+            $currentGradeName = $student->schoolClass->name; // e.g. "Grade 10"
             $status = $failed_academic ? 'retained' : 'promoted';
             
-            // Detect Final Year (Grade 11)
-            $isFinalYear = preg_match('/Grade\s+11/i', $currentGradeName);
+            // Detect Final Year (Grade 11) - case insensitive and flexible on spacing
+            $isFinalYear = preg_match('/Grade\s*11\b/i', $currentGradeName);
 
             if ($status === 'promoted' && $isFinalYear) {
                 $status = 'graduated';
@@ -78,11 +79,13 @@ class PromotionController extends Controller
             // Automation: Suggest Target Class
             $targetClassId = null;
             if ($status === 'promoted') {
-                // Try to find "Grade (X+1)"
-                if (preg_match('/Grade\s+(\d+)/i', $currentGradeName, $matches)) {
+                // Find current grade number
+                if (preg_match('/Grade\s*(\d+)/i', $currentGradeName, $matches)) {
                     $nextNum = intval($matches[1]) + 1;
                     $nextGradeName = "Grade " . $nextNum;
-                    $targetClass = SchoolClass::where('name', $nextGradeName)
+                    
+                    // Look for the next grade in the target year with the same section
+                    $targetClass = SchoolClass::where('name', 'LIKE', $nextGradeName . '%')
                         ->where('section', $student->schoolClass->section)
                         ->where('academic_year', $request->to_academic_year)
                         ->first();
@@ -213,17 +216,28 @@ class PromotionController extends Controller
     }
 
     /**
-     * Copy class structure from source year to target year
+     * Copy class structure from source year to target year.
      */
     public function initializeTargetClasses(Request $request)
     {
         $request->validate([
             'from_academic_year' => 'required|string',
-            'to_academic_year' => 'required|string'
+            'to_academic_year'   => 'required|string'
         ]);
 
+        // Resolve target AcademicYear record (create it if it doesn't exist yet)
+        $targetYearRecord = AcademicYear::firstOrCreate(
+            ['name' => $request->to_academic_year],
+            [
+                'start_date' => substr($request->to_academic_year, 0, 4) . '-09-01',
+                'end_date'   => substr($request->to_academic_year, 5, 4) . '-06-30',
+                'is_active'  => false,
+                'status'     => 'upcoming',
+            ]
+        );
+
         $sourceClasses = SchoolClass::where('academic_year', $request->from_academic_year)->get();
-        
+
         if ($sourceClasses->isEmpty()) {
             return response()->json(['message' => 'No source classes found to replicate.'], 404);
         }
@@ -237,37 +251,52 @@ class PromotionController extends Controller
 
             if (!$exists) {
                 SchoolClass::create([
-                    'name' => $class->name,
-                    'section' => $class->section,
-                    'academic_year' => $request->to_academic_year
+                    'name'             => $class->name,
+                    'section'          => $class->section,
+                    'academic_year'    => $request->to_academic_year,
+                    'academic_year_id' => $targetYearRecord->id,
                 ]);
                 $createdCount++;
             }
         }
 
         return response()->json([
-            'message' => "Successfully initialized $createdCount classes for {$request->to_academic_year}.",
+            'message'       => "Successfully initialized $createdCount classes for {$request->to_academic_year}.",
             'created_count' => $createdCount
         ]);
     }
 
     /**
-     * Find or create a class for students repeating the year
+     * Get classes for a specific academic year string (used by the promotion dropdown).
+     */
+    public function getClassesForYear(Request $request)
+    {
+        $request->validate(['academic_year' => 'required|string']);
+
+        $classes = SchoolClass::where('academic_year', $request->academic_year)
+            ->withCount('students')
+            ->get();
+
+        return response()->json($classes);
+    }
+
+    /**
+     * Find or create a class for students repeating the year.
      */
     private function findRepeatClass($originalClass, $newAcademicYear)
     {
-        // Try to find existing class with same grade and section for new year
         $repeatClass = SchoolClass::where('name', $originalClass->name)
             ->where('section', $originalClass->section)
             ->where('academic_year', $newAcademicYear)
             ->first();
 
         if (!$repeatClass) {
-            // Create new class for the new academic year
+            $yearRecord = AcademicYear::where('name', $newAcademicYear)->first();
             $repeatClass = SchoolClass::create([
-                'name' => $originalClass->name,
-                'section' => $originalClass->section,
-                'academic_year' => $newAcademicYear
+                'name'             => $originalClass->name,
+                'section'          => $originalClass->section,
+                'academic_year'    => $newAcademicYear,
+                'academic_year_id' => $yearRecord?->id,
             ]);
         }
 

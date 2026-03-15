@@ -10,6 +10,7 @@ class StudentEnrollment extends Model
         'student_id',
         'class_id',
         'academic_year',
+        'academic_year_id',
         'status',
         'enrollment_date',
         'notes'
@@ -18,6 +19,11 @@ class StudentEnrollment extends Model
     protected $casts = [
         'enrollment_date' => 'date'
     ];
+
+    public function academicYear()
+    {
+        return $this->belongsTo(AcademicYear::class, 'academic_year_id');
+    }
 
     public function student()
     {

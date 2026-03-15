@@ -29,6 +29,8 @@ class AnalyticsController extends Controller
                 'total_students' => Student::count(),
                 'total_teachers' => Teacher::count(),
                 'total_parents' => UserParent::count(),
+                'total_classes' => SchoolClass::count(),
+                'total_subjects' => \App\Models\Subject::count(),
                 'attendance_rate' => $this->getGlobalAttendanceRate(),
                 'chronic_absenteeism' => Insight::where('insight_type', 'attendance')->where('severity', 'high')->count(),
                 'collection_rate' => $this->getFinanceOverview()['collection_rate'] ?? 0,
@@ -38,8 +40,8 @@ class AnalyticsController extends Controller
                 'best_students' => $this->getBestStudents(),
             ],
             'charts' => [
-                'attendance_trend' => $this->getAttendanceTrend(),
-                'attendance_by_grade' => $this->getAttendanceByGrade(),
+                'performance_trend' => $this->getPerformanceTrend(),
+                'students_by_class' => $this->getStudentsByClassCount(),
                 'registration_trend' => $this->getRegistrationTrend(),
             ],
             'insights' => Insight::latest()->take(5)->get(),
@@ -174,6 +176,37 @@ class AnalyticsController extends Controller
     }
 
     // Helper functions
+    protected function getPerformanceTrend()
+    {
+        return Grade::select(DB::raw('date, avg(score) as avg_score'))
+            ->whereNotNull('date')
+            ->groupBy('date')
+            ->orderBy('date', 'asc')
+            ->take(10)
+            ->get()
+            ->map(function($item) {
+                return [
+                    'date' => $item->date,
+                    'avg_score' => round($item->avg_score, 2)
+                ];
+            });
+    }
+
+    protected function getStudentsByClassCount()
+    {
+        return SchoolClass::withCount('students')
+            ->get()
+            ->map(function($class) {
+                return [
+                    'class_name' => $class->name . ' ' . $class->section,
+                    'count' => $class->students_count
+                ];
+            })
+            ->sortByDesc('count')
+            ->take(5)
+            ->values();
+    }
+
     protected function getGlobalAttendanceRate()
     {
         $total = AttendanceRecord::count();
@@ -213,11 +246,23 @@ class AnalyticsController extends Controller
 
     protected function getStudentGPA($studentId, $enrollmentId = null)
     {
-        $query = Grade::where('student_id', $studentId);
+        // Define standard academic cycle terms to match frontend
+        $standardTerms = ['Test 1', 'Test 2', 'Exam 1', 'Test 3', 'Exam 2'];
+
+        $query = Grade::where('student_id', $studentId)
+            ->whereIn('term', $standardTerms);
+            
         if ($enrollmentId) {
             $query->where('enrollment_id', $enrollmentId);
         }
-        return $query->avg('score') ?: 0;
+        
+        $avgBySubject = $query->get()
+            ->groupBy('subject_id')
+            ->map(function($subjectGrades) {
+                return $subjectGrades->avg('score');
+            });
+            
+        return $avgBySubject->isEmpty() ? 0 : round($avgBySubject->avg(), 1);
     }
 
     protected function getStudentAttendanceTrend($studentId, $enrollmentId = null)
@@ -228,8 +273,7 @@ class AnalyticsController extends Controller
         }
         
         return $query->orderBy('date', 'desc')
-            ->take(10)
-            ->get(['date', 'status']);
+            ->get(['date', 'status', 'remarks']);
     }
 
     protected function getGradeDistribution()
