@@ -8,6 +8,7 @@ use App\Models\SchoolClass;
 use App\Models\Subject;
 use App\Models\Teacher;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
 
 class AcademicController extends Controller
 {
@@ -42,7 +43,10 @@ class AcademicController extends Controller
 
         foreach ($classes as $class) {
             if (!$class->subjects()->where('subject_id', $subject->id)->exists()) {
-                $class->subjects()->attach($subject->id, ['teacher_id' => $teacher->id]);
+                $class->subjects()->attach($subject->id, [
+                    'teacher_id'       => $teacher->id,
+                    'academic_year_id' => $class->academic_year_id
+                ]);
             }
         }
 
@@ -182,7 +186,10 @@ class AcademicController extends Controller
         $classes = $query->get();
 
         $hierarchy = $classes->groupBy('name')->map(function ($sections, $gradeName) {
-            $subjects = $sections->flatMap->subjects->unique('id')->values();
+            // Safer way to get unique subjects for the entire grade
+            $subjects = $sections->flatMap(function($section) {
+                return $section->subjects ?? collect();
+            })->unique('id')->values();
 
             return [
                 'name'     => $gradeName,
@@ -190,16 +197,16 @@ class AcademicController extends Controller
                     return [
                         'id'             => $section->id,
                         'name'           => $section->section,
-                        'students_count' => $section->students->count(),
-                        'subjects_count' => $section->subjects->count(),
-                        'students'       => $section->students->map(function ($student) {
+                        'students_count' => $section->students ? $section->students->count() : 0,
+                        'subjects_count' => $section->subjects ? $section->subjects->count() : 0,
+                        'students'       => ($section->students ?? collect())->map(function ($student) {
                             return [
                                 'id'    => $student->id,
-                                'name'  => $student->user->name,
-                                'email' => $student->user->email,
+                                'name'  => $student->user->name ?? 'Unknown Student',
+                                'email' => $student->user->email ?? '',
                             ];
                         }),
-                        'subjects'       => $section->subjects->map(function ($subject) {
+                        'subjects'       => ($section->subjects ?? collect())->map(function ($subject) {
                             return [
                                 'id'   => $subject->id,
                                 'name' => $subject->name,

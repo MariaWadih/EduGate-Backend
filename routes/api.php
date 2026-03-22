@@ -82,6 +82,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/academic-years', [AcademicYearController::class, 'store']);
         Route::put('/academic-years/{id}', [AcademicYearController::class, 'update']);
         Route::post('/academic-years/{id}/activate', [AcademicYearController::class, 'activate']);
+        Route::get('/academic-years/{id}/records', [AcademicYearController::class, 'records']);
     });
 
 

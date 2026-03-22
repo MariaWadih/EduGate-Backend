@@ -32,6 +32,11 @@ class AcademicYear extends Model
         return $this->hasMany(StudentEnrollment::class, 'academic_year_id');
     }
 
+    public function classSubjectTeachers()
+    {
+        return $this->hasMany(ClassSubjectTeacher::class, 'academic_year_id');
+    }
+
     // ── Helpers ────────────────────────────────────────────────────
 
     /**

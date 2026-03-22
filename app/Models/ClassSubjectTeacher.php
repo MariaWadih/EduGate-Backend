@@ -7,7 +7,12 @@ use Illuminate\Database\Eloquent\Model;
 class ClassSubjectTeacher extends Model
 {
     protected $table = 'class_subject_teacher';
-    protected $fillable = ['class_id', 'subject_id', 'teacher_id'];
+    protected $fillable = ['class_id', 'subject_id', 'teacher_id', 'academic_year_id'];
+
+    public function academicYear()
+    {
+        return $this->belongsTo(AcademicYear::class, 'academic_year_id');
+    }
 
     public function schoolClass()
     {

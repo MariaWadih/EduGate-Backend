@@ -22,26 +22,30 @@ use Carbon\Carbon;
 
 class AnalyticsController extends Controller
 {
-    public function adminOverview()
+    public function adminOverview(Request $request)
     {
+        $yearId = $request->query('academic_year_id');
+        
         $data = [
             'metrics' => [
-                'total_students' => Student::count(),
-                'total_teachers' => Teacher::count(),
+                'total_students' => $yearId ? \App\Models\StudentEnrollment::where('academic_year_id', $yearId)->count() : Student::count(),
+                'total_teachers' => $yearId ? Teacher::whereHas('assignments', function($q) use ($yearId) {
+                    $q->where('academic_year_id', $yearId);
+                })->count() : Teacher::count(),
                 'total_parents' => UserParent::count(),
-                'total_classes' => SchoolClass::count(),
-                'total_subjects' => \App\Models\Subject::count(),
-                'attendance_rate' => $this->getGlobalAttendanceRate(),
+                'total_classes' => $yearId ? SchoolClass::where('academic_year_id', $yearId)->count() : SchoolClass::count(),
+                'total_subjects' => $yearId ? \App\Models\ClassSubjectTeacher::where('academic_year_id', $yearId)->distinct('subject_id')->count() : \App\Models\Subject::count(),
+                'attendance_rate' => $this->getGlobalAttendanceRate($yearId),
                 'chronic_absenteeism' => Insight::where('insight_type', 'attendance')->where('severity', 'high')->count(),
                 'collection_rate' => $this->getFinanceOverview()['collection_rate'] ?? 0,
             ],
             'rankings' => [
-                'top_classes' => $this->getTopPerformingClasses(),
-                'best_students' => $this->getBestStudents(),
+                'top_classes' => $this->getTopPerformingClasses($yearId),
+                'best_students' => $this->getBestStudents($yearId),
             ],
             'charts' => [
-                'performance_trend' => $this->getPerformanceTrend(),
-                'students_by_class' => $this->getStudentsByClassCount(),
+                'performance_trend' => $this->getPerformanceTrend($yearId),
+                'students_by_class' => $this->getStudentsByClassCount($yearId),
                 'registration_trend' => $this->getRegistrationTrend(),
             ],
             'insights' => Insight::latest()->take(5)->get(),
@@ -176,11 +180,18 @@ class AnalyticsController extends Controller
     }
 
     // Helper functions
-    protected function getPerformanceTrend()
+    protected function getPerformanceTrend($yearId = null)
     {
-        return Grade::select(DB::raw('date, avg(score) as avg_score'))
-            ->whereNotNull('date')
-            ->groupBy('date')
+        $query = Grade::select(DB::raw('date, avg(score) as avg_score'))
+            ->whereNotNull('date');
+            
+        if ($yearId) {
+            $query->whereHas('enrollment', function($q) use ($yearId) {
+                $q->where('academic_year_id', $yearId);
+            });
+        }
+
+        return $query->groupBy('date')
             ->orderBy('date', 'asc')
             ->take(10)
             ->get()
@@ -192,10 +203,15 @@ class AnalyticsController extends Controller
             });
     }
 
-    protected function getStudentsByClassCount()
+    protected function getStudentsByClassCount($yearId = null)
     {
-        return SchoolClass::withCount('students')
-            ->get()
+        $query = SchoolClass::withCount('students');
+        
+        if ($yearId) {
+            $query->where('academic_year_id', $yearId);
+        }
+
+        return $query->get()
             ->map(function($class) {
                 return [
                     'class_name' => $class->name . ' ' . $class->section,
@@ -207,11 +223,18 @@ class AnalyticsController extends Controller
             ->values();
     }
 
-    protected function getGlobalAttendanceRate()
+    protected function getGlobalAttendanceRate($yearId = null)
     {
-        $total = AttendanceRecord::count();
+        $query = AttendanceRecord::query();
+        if ($yearId) {
+            $query->whereHas('enrollment', function($q) use ($yearId) {
+                $q->where('academic_year_id', $yearId);
+            });
+        }
+
+        $total = $query->count();
         if ($total == 0) return 0;
-        $present = AttendanceRecord::where('status', 'present')->count();
+        $present = (clone $query)->where('status', 'present')->count();
         return round(($present / $total) * 100, 2);
     }
 
@@ -283,9 +306,14 @@ class AnalyticsController extends Controller
             ->get();
     }
 
-    protected function getTopPerformingClasses()
+    protected function getTopPerformingClasses($yearId = null)
     {
-        return SchoolClass::with(['students.grades'])
+        $query = SchoolClass::query();
+        if ($yearId) {
+            $query->where('academic_year_id', $yearId);
+        }
+
+        return $query->with(['students.grades'])
             ->get()
             ->map(function($class) {
                 $scores = $class->students->flatMap->grades->pluck('score');
@@ -300,14 +328,24 @@ class AnalyticsController extends Controller
             ->values();
     }
 
-    protected function getBestStudents()
+    protected function getBestStudents($yearId = null)
     {
-        return Student::with(['user', 'grades', 'schoolClass'])
-            ->get()
-            ->map(function($student) {
+        $query = Student::with(['user', 'grades', 'schoolClass']);
+        if ($yearId) {
+            $query->whereHas('enrollments', function($q) use ($yearId) {
+                $q->where('academic_year_id', $yearId);
+            });
+        }
+
+        return $query->get()
+            ->map(function($student) use ($yearId) {
+                $grades = $student->grades;
+                if ($yearId) {
+                    $grades = $grades->where('academic_year_id', $yearId);
+                }
                 return [
                     'name' => $student->user->name,
-                    'gpa' => round($student->grades->avg('score') ?: 0, 2),
+                    'gpa' => round($grades->avg('score') ?: 0, 2),
                     'class' => $student->schoolClass ? $student->schoolClass->name . ' ' . $student->schoolClass->section : 'N/A'
                 ];
             })

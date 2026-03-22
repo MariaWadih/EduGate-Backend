@@ -11,11 +11,20 @@ use Illuminate\Support\Facades\DB;
 
 class StudentController extends Controller
 {
-    public function index()
+    public function index(Request $request)
     {
-        return Student::with(['user', 'schoolClass', 'parents.user'])
-            ->withAvg('grades', 'score')
-            ->get();
+        $query = Student::with(['user', 'schoolClass', 'parents.user'])
+            ->withAvg('grades', 'score');
+
+        if ($request->has('academic_year_id')) {
+            $query->whereHas('schoolClass', function ($q) use ($request) {
+                $q->where('academic_year_id', $request->academic_year_id);
+            });
+        } elseif ($request->has('academic_year')) {
+            $query->where('current_academic_year', $request->academic_year);
+        }
+
+        return $query->get();
     }
 
     public function store(Request $request)
@@ -35,9 +44,24 @@ class StudentController extends Controller
                 'role' => 'student',
             ]);
 
+            $schoolClass = \App\Models\SchoolClass::findOrFail($request->class_id);
             $student = Student::create([
                 'user_id' => $user->id,
                 'class_id' => $request->class_id,
+                'status' => 'active',
+                'enrolled_at' => now(),
+                'current_academic_year' => $schoolClass->academic_year,
+            ]);
+
+            // Create enrollment record to track history
+            \App\Models\StudentEnrollment::create([
+                'student_id' => $student->id,
+                'class_id' => $request->class_id,
+                'academic_year' => $schoolClass->academic_year,
+                'academic_year_id' => $schoolClass->academic_year_id,
+                'status' => 'active',
+                'enrollment_date' => now(),
+                'notes' => 'Initial enrollment'
             ]);
 
             return response()->json($student->load(['user', 'schoolClass']), 201);
@@ -75,10 +99,25 @@ class StudentController extends Controller
             }
 
             $oldStatus = $student->status;
+            $schoolClass = \App\Models\SchoolClass::findOrFail($request->class_id);
             $student->update([
                 'class_id' => $request->class_id,
-                'status' => $request->status ?? $student->status
+                'status' => $request->status ?? $student->status,
+                'current_academic_year' => $schoolClass->academic_year,
             ]);
+
+            // Sync enrollment record
+            \App\Models\StudentEnrollment::updateOrCreate(
+                [
+                    'student_id' => $student->id,
+                    'academic_year' => $schoolClass->academic_year,
+                ],
+                [
+                    'class_id' => $request->class_id,
+                    'academic_year_id' => $schoolClass->academic_year_id,
+                    'status' => $student->status,
+                ]
+            );
 
             // If status changed to non-active, trigger revocation
             if ($student->status !== 'active' && $oldStatus === 'active') {

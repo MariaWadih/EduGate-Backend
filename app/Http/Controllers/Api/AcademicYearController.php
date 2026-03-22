@@ -86,4 +86,20 @@ class AcademicYearController extends Controller
 
         return response()->json($year);
     }
+
+    /**
+     * Get all records for a specific academic year.
+     */
+    public function records($id)
+    {
+        $year = AcademicYear::with([
+            'enrollments.student.user',
+            'enrollments.schoolClass',
+            'classSubjectTeachers.teacher.user',
+            'classSubjectTeachers.subject',
+            'classSubjectTeachers.schoolClass'
+        ])->findOrFail($id);
+
+        return response()->json($year);
+    }
 }

@@ -11,9 +11,22 @@ use Illuminate\Support\Facades\DB;
 
 class TeacherController extends Controller
 {
-    public function index()
+    public function index(Request $request)
     {
-        return Teacher::with(['user', 'assignments.schoolClass', 'assignments.subject'])->get();
+        $query = Teacher::with(['user', 'assignments' => function($q) use ($request) {
+            if ($request->has('academic_year_id')) {
+                $q->where('academic_year_id', $request->academic_year_id);
+            }
+            $q->with(['schoolClass', 'subject']);
+        }]);
+
+        if ($request->has('academic_year_id')) {
+            $query->whereHas('assignments', function($q) use ($request) {
+                $q->where('academic_year_id', $request->academic_year_id);
+            });
+        }
+
+        return $query->get();
     }
 
     public function store(Request $request)
@@ -45,10 +58,12 @@ class TeacherController extends Controller
                 $this->validateAssignments($teacher, $request->assignments);
                 
                 foreach ($request->assignments as $assignment) {
+                    $class = \App\Models\SchoolClass::findOrFail($assignment['class_id']);
                     \App\Models\ClassSubjectTeacher::create([
                         'teacher_id' => $teacher->id,
                         'class_id' => $assignment['class_id'],
                         'subject_id' => $assignment['subject_id'],
+                        'academic_year_id' => $class->academic_year_id,
                     ]);
                 }
             }
@@ -96,10 +111,12 @@ class TeacherController extends Controller
                     $this->validateAssignments($teacher, $request->assignments);
                     \App\Models\ClassSubjectTeacher::where('teacher_id', $teacher->id)->delete();
                     foreach ($request->assignments as $assignment) {
+                        $class = \App\Models\SchoolClass::findOrFail($assignment['class_id']);
                         \App\Models\ClassSubjectTeacher::create([
                             'teacher_id' => $teacher->id,
                             'class_id' => $assignment['class_id'],
                             'subject_id' => $assignment['subject_id'],
+                            'academic_year_id' => $class->academic_year_id,
                         ]);
                     }
                 }
