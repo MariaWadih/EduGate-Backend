@@ -3,6 +3,8 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Facades\DB;
+use App\Models\Teacher;
 
 class AcademicYear extends Model
 {
@@ -36,6 +38,10 @@ class AcademicYear extends Model
     {
         return $this->hasMany(ClassSubjectTeacher::class, 'academic_year_id');
     }
+    public function teachers()
+{
+    return $this->belongsToMany(Teacher::class, 'teacher_academic_years');
+}
 
     // ── Helpers ────────────────────────────────────────────────────
 
@@ -61,8 +67,20 @@ class AcademicYear extends Model
      * Set this year as active and deactivate all others atomically.
      */
     public function activate(): void
-    {
-        static::where('is_active', true)->update(['is_active' => false, 'status' => 'completed']);
-        $this->update(['is_active' => true, 'status' => 'active']);
-    }
+{
+    static::where('is_active', true)->update(['is_active' => false, 'status' => 'completed']);
+    $this->update(['is_active' => true, 'status' => 'active']);
+
+    // Carry over all active teachers into this year
+    $activeTeacherIds = Teacher::where('status', 'active')->pluck('id');
+
+    $records = $activeTeacherIds->map(fn($id) => [
+        'teacher_id'       => $id,
+        'academic_year_id' => $this->id,
+        'created_at'       => now(),
+        'updated_at'       => now(),
+    ])->toArray();
+
+    DB::table('teacher_academic_years')->insertOrIgnore($records);
+}
 }

@@ -11,23 +11,24 @@ use Illuminate\Support\Facades\DB;
 
 class TeacherController extends Controller
 {
-    public function index(Request $request)
-    {
-        $query = Teacher::with(['user', 'assignments' => function($q) use ($request) {
-            if ($request->has('academic_year_id')) {
-                $q->where('academic_year_id', $request->academic_year_id);
-            }
-            $q->with(['schoolClass', 'subject']);
-        }]);
-
+public function index(Request $request)
+{
+    $query = Teacher::with(['user', 'assignments' => function($q) use ($request) {
         if ($request->has('academic_year_id')) {
-            $query->whereHas('assignments', function($q) use ($request) {
-                $q->where('academic_year_id', $request->academic_year_id);
-            });
+            $q->where('academic_year_id', $request->academic_year_id);
         }
+        $q->with(['schoolClass', 'subject']);
+    }]);
 
-        return $query->get();
+    // Use the new pivot table instead of whereHas on assignments
+    if ($request->has('academic_year_id')) {
+        $query->whereHas('academicYears', function($q) use ($request) {
+            $q->where('academic_year_id', $request->academic_year_id);
+        });
     }
+
+    return $query->get();
+}
 
     public function store(Request $request)
     {
@@ -53,6 +54,16 @@ class TeacherController extends Controller
                 'status' => 'active',
                 'joined_at' => now()
             ]);
+
+            $activeYear = \App\Models\AcademicYear::active();
+            if ($activeYear) {
+                DB::table('teacher_academic_years')->insertOrIgnore([
+                    'teacher_id'       => $teacher->id,
+                    'academic_year_id' => $activeYear->id,
+                    'created_at'       => now(),
+                    'updated_at'       => now(),
+                ]);
+            }
 
             if ($request->has('assignments')) {
                 $this->validateAssignments($teacher, $request->assignments);
@@ -101,15 +112,24 @@ class TeacherController extends Controller
             $newStatus = $request->status ?? $teacher->status;
 
             // If status changed to non-active, trigger revocation and clear assignments
-            if ($newStatus !== 'active' && $oldStatus === 'active') {
-                \App\Models\ClassSubjectTeacher::where('teacher_id', $teacher->id)->delete();
-                $user->tokens()->delete();
-                $teacher->update(['status' => $newStatus]);
-            } else {
-                // Update basic info and sync assignments if active
-                if ($request->has('assignments')) {
-                    $this->validateAssignments($teacher, $request->assignments);
-                    \App\Models\ClassSubjectTeacher::where('teacher_id', $teacher->id)->delete();
+// NEW
+if ($newStatus !== 'active' && $oldStatus === 'active') {
+    $activeYear = \App\Models\AcademicYear::active();
+    if ($activeYear) {
+        \App\Models\ClassSubjectTeacher::where('teacher_id', $teacher->id)
+            ->where('academic_year_id', $activeYear->id)
+            ->delete();
+    }
+    $user->tokens()->delete();
+    $teacher->update(['status' => $newStatus]);
+} else {
+    // Update basic info and sync assignments if active
+    if ($request->has('assignments')) {
+        $this->validateAssignments($teacher, $request->assignments);
+        $activeYear = \App\Models\AcademicYear::active();
+        \App\Models\ClassSubjectTeacher::where('teacher_id', $teacher->id)
+            ->where('academic_year_id', $activeYear?->id)
+            ->delete();
                     foreach ($request->assignments as $assignment) {
                         $class = \App\Models\SchoolClass::findOrFail($assignment['class_id']);
                         \App\Models\ClassSubjectTeacher::create([
@@ -148,10 +168,16 @@ class TeacherController extends Controller
         $teacher = Teacher::findOrFail($id);
         
         // If setting to inactive/former, remove all current assignments
-        if ($request->status !== 'active') {
-            \App\Models\ClassSubjectTeacher::where('teacher_id', $teacher->id)->delete();
-            $teacher->user->tokens()->delete();
-        }
+// NEW
+if ($request->status !== 'active') {
+    $activeYear = \App\Models\AcademicYear::active();
+    if ($activeYear) {
+        \App\Models\ClassSubjectTeacher::where('teacher_id', $teacher->id)
+            ->where('academic_year_id', $activeYear->id)
+            ->delete();
+    }
+    $teacher->user->tokens()->delete();
+}
         
         $teacher->update(['status' => $request->status]);
 
@@ -234,5 +260,68 @@ class TeacherController extends Controller
         }
 
         return true;
+    }
+
+        /**
+     * Get teachers not in the current active year.
+     */
+    public function past()
+{
+    $activeYear = \App\Models\AcademicYear::active();
+
+    if (!$activeYear) {
+        return response()->json([]);
+    }
+
+    $teachers = Teacher::with(['user', 'assignments'])
+        ->where(function($q) use ($activeYear) {
+            // Not linked to current year at all
+            $q->whereNotIn('id', function($sub) use ($activeYear) {
+                $sub->select('teacher_id')
+                    ->from('teacher_academic_years')
+                    ->where('academic_year_id', $activeYear->id);
+            })
+            // OR linked but inactive/former
+            ->orWhere(function($sub) use ($activeYear) {
+                $sub->whereIn('id', function($inner) use ($activeYear) {
+                    $inner->select('teacher_id')
+                        ->from('teacher_academic_years')
+                        ->where('academic_year_id', $activeYear->id);
+                })->whereIn('status', ['inactive', 'former']);
+            });
+        })
+        ->get();
+
+    return response()->json($teachers);
+}
+    /**
+     * Reactivate a past teacher into the current active year.
+     */
+    public function reactivate($id)
+    {
+        $teacher = Teacher::findOrFail($id);
+        $activeYear = \App\Models\AcademicYear::active();
+
+        if (!$activeYear) {
+            return response()->json(['message' => 'No active academic year found'], 400);
+        }
+
+        DB::transaction(function() use ($teacher, $activeYear) {
+            // Add to current year
+            DB::table('teacher_academic_years')->insertOrIgnore([
+                'teacher_id'       => $teacher->id,
+                'academic_year_id' => $activeYear->id,
+                'created_at'       => now(),
+                'updated_at'       => now(),
+            ]);
+
+            // Reactivate status
+            $teacher->update(['status' => 'active']);
+        });
+
+        return response()->json([
+            'message' => 'Teacher reactivated successfully',
+            'teacher' => $teacher->load(['user', 'assignments'])
+        ]);
     }
 }

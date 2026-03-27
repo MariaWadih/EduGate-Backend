@@ -48,6 +48,8 @@ Route::middleware('auth:sanctum')->group(function () {
 
     // Admin Only
     Route::middleware('role:admin')->group(function () {
+        Route::get('/teachers/past', [TeacherController::class, 'past']);
+        Route::post('/teachers/{id}/reactivate', [TeacherController::class, 'reactivate']);
         Route::post('/users/register', [AuthController::class, 'register']);
         Route::apiResource('/classes', ClassController::class)->except(['show']);
         Route::apiResource('/subjects', SubjectController::class);

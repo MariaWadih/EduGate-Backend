@@ -90,7 +90,7 @@ class AcademicYearController extends Controller
     /**
      * Get all records for a specific academic year.
      */
-   public function records($id)
+public function records($id)
 {
     $year = AcademicYear::with([
         'enrollments.schoolClass',
@@ -100,7 +100,12 @@ class AcademicYearController extends Controller
         },
         'classSubjectTeachers.teacher.user',
         'classSubjectTeachers.subject',
-        'classSubjectTeachers.schoolClass'
+        'classSubjectTeachers.schoolClass',
+        // Include all teachers linked to this year, even without assignments
+        'teachers.user',
+        'teachers.assignments' => function($q) use ($id) {
+            $q->where('academic_year_id', $id)->with(['schoolClass', 'subject']);
+        },
     ])->findOrFail($id);
 
     return response()->json($year);
