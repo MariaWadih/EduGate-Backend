@@ -52,6 +52,7 @@ class GradeController extends Controller
         $savedGrades = [];
         
         DB::transaction(function () use ($validated, $teacherId, &$savedGrades) {
+            foreach ($validated['grades'] as $gradeData) {
                 $student = Student::find($gradeData['student_id']);
                 $currentEnrollment = $student?->currentEnrollment;
 
@@ -71,6 +72,7 @@ class GradeController extends Controller
                     ]
                 );
                 $savedGrades[] = $grade;
+            }
         });
 
         return response()->json(['message' => 'Grades saved successfully', 'data' => $savedGrades], 200);

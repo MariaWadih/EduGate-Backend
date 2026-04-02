@@ -161,19 +161,35 @@ class AnalyticsController extends Controller
             return response()->json(['error' => 'Unauthorized or student is inactive'], 403);
         }
 
-        $student = Student::with(['user', 'schoolClass', 'currentEnrollment', 'grades.subject', 'examResults.exam'])->find($targetStudentId);
-        $currentEnrollment = $student->currentEnrollment;
+        $student = Student::with(['user', 'schoolClass', 'currentEnrollment'])->find($targetStudentId);
+        $enrollmentId = $student->currentEnrollment?->id;
 
         $data = [
-            'current_student' => $student,
+            'current_student' => [
+                'user' => $student->user,
+                'school_class' => $student->schoolClass,
+                'current_enrollment' => $student->currentEnrollment,
+                'grades' => Grade::where('student_id', $targetStudentId)
+                            ->when($enrollmentId, fn($q) => $q->where('enrollment_id', $enrollmentId))
+                            ->with('subject')
+                            ->get()
+            ],
             'metrics' => [
-                'attendance_rate' => $this->getStudentAttendanceRate($targetStudentId, $currentEnrollment?->id),
-                'gpa' => $this->getStudentGPA($targetStudentId, $currentEnrollment?->id),
+                'attendance_rate' => $this->getStudentAttendanceRate($targetStudentId, $enrollmentId),
+                'gpa' => $this->getStudentGPA($targetStudentId, $enrollmentId),
             ],
             'exams' => \App\Models\Exam::where('class_id', $student->class_id)->where('date', '>=', now())->get(),
+            'schedules' => \App\Models\Schedule::where('class_id', $student->class_id)->with('subject')->get(),
+            'attendance' => \App\Models\AttendanceRecord::where('student_id', $student->id)
+                            ->when($enrollmentId, fn($q) => $q->where('enrollment_id', $enrollmentId))
+                            ->latest()->take(30)->get(),
+            'assignments' => \App\Models\Homework::where('class_id', $student->class_id)
+                ->with(['subject', 'teacher.user', 'submissions' => function($q) use ($targetStudentId) {
+                    $q->where('student_id', $targetStudentId);
+                }])->get(),
             'announcements' => Announcement::latest()->take(3)->get(),
             'insights' => Insight::where('related_entity_id', $targetStudentId)->where('scope', 'student')->get(),
-            'provenance' => ['attendance_records', 'grades', 'insights', 'parent_student']
+            'provenance' => ['attendance_records', 'grades', 'insights', 'parent_student', 'schedules', 'homeworks']
         ];
 
         return response()->json($data);
@@ -269,23 +285,26 @@ class AnalyticsController extends Controller
 
     protected function getStudentGPA($studentId, $enrollmentId = null)
     {
-        // Define standard academic cycle terms to match frontend
-        $standardTerms = ['Test 1', 'Test 2', 'Exam 1', 'Test 3', 'Exam 2'];
-
+        $terms = ['Test 1', 'Test 2', 'Exam 1', 'Test 3', 'Exam 2'];
         $query = Grade::where('student_id', $studentId)
-            ->whereIn('term', $standardTerms);
+            ->whereIn('term', $terms);
             
         if ($enrollmentId) {
             $query->where('enrollment_id', $enrollmentId);
         }
         
-        $avgBySubject = $query->get()
-            ->groupBy('subject_id')
-            ->map(function($subjectGrades) {
-                return $subjectGrades->avg('score');
+        $grades = $query->get();
+        if ($grades->isEmpty()) return 0;
+
+        // Group by subject, then calculate average across the 5 standard pillars for each subject
+        $subjectOverallScores = $grades->groupBy('subject_id')
+            ->map(function($subjectGrades) use ($terms) {
+                // Sum only the 5 pillars and divide by 5 as per standard evaluation structure
+                $sum = $subjectGrades->sum('score');
+                return $sum / count($terms);
             });
             
-        return $avgBySubject->isEmpty() ? 0 : round($avgBySubject->avg(), 1);
+        return round($subjectOverallScores->avg(), 1);
     }
 
     protected function getStudentAttendanceTrend($studentId, $enrollmentId = null)
