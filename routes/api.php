@@ -96,6 +96,7 @@ Route::middleware('auth:sanctum')->group(function () {
     // Student & Parent (Shared stuff) - Specific paths first to avoid parameter collision
     Route::middleware('role:student,parent,teacher,admin')->group(function () {
         Route::get('/homework/my', [HomeworkController::class, 'myHomework']);
+        Route::get('/parent/homework', [HomeworkController::class, 'childHomework']);
         Route::post('/homework/submit', [HomeworkController::class, 'submitHomework']);
         Route::get('/homework/file/download', [HomeworkController::class, 'downloadFile']);
         Route::get('/attendance/my', [AttendanceController::class, 'myAttendance']);

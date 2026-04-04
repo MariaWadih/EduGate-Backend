@@ -202,4 +202,37 @@ class HomeworkController extends Controller
         $homework->delete();
         return response()->json(null, 204);
     }
+
+
+   public function childHomework(Request $request)
+{
+    $parent = $request->user()->parent;
+    if (!$parent) {
+        return response()->json(['message' => 'Unauthorized'], 403);
+    }
+
+    $studentId = $request->query('student_id');
+
+    // Verify this child belongs to this parent
+    $child = $parent->students()->where('students.id', $studentId)->first();
+    if (!$child) {
+        return response()->json(['message' => 'Forbidden'], 403);
+    }
+
+    $currentEnrollment = $child->currentEnrollment;
+    if (!$currentEnrollment) {
+        return response()->json([]);
+    }
+
+    $homeworks = Homework::where('class_id', $currentEnrollment->class_id)
+        ->with(['subject', 'teacher.user'])
+        ->with(['submissions' => function($query) use ($child, $currentEnrollment) {
+            $query->where('student_id', $child->id)
+                  ->where('enrollment_id', $currentEnrollment->id);
+        }])
+        ->latest()
+        ->get();
+
+    return response()->json($homeworks);
+}
 }
