@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\AttendanceRecord;
 use Illuminate\Http\Request;
 use Carbon\Carbon;
+use App\Models\Student;
 
 class AttendanceController extends Controller
 {
@@ -134,4 +135,31 @@ class AttendanceController extends Controller
                     ->get();
         return response()->json($records);
     }
+
+    public function childAttendance(Request $request, $studentId)
+{
+    $parent = $request->user()->parent;
+    if (!$parent) {
+        return response()->json(['message' => 'Unauthorized'], 403);
+    }
+
+    // Make sure this student is actually a child of this parent
+    $isChild = $parent->students()->where('students.id', $studentId)->exists();
+    if (!$isChild) {
+        return response()->json(['message' => 'This student is not your child'], 403);
+    }
+
+    $student = Student::find($studentId);
+    $currentEnrollment = $student->currentEnrollment;
+    if (!$currentEnrollment) {
+        return response()->json([]);
+    }
+
+    return response()->json(
+        AttendanceRecord::where('student_id', $studentId)
+            ->where('enrollment_id', $currentEnrollment->id)
+            ->orderBy('date', 'desc')
+            ->get()
+    );
+}
 }

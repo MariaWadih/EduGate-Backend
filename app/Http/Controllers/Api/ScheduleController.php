@@ -61,4 +61,19 @@ class ScheduleController extends Controller
         $schedule->delete();
         return response()->json(['message' => 'Schedule entry deleted successfully']);
     }
+
+    public function mySchedule(Request $request)
+{
+    $student = $request->user()->student;
+    if (!$student) {
+        return response()->json(['message' => 'Unauthorized'], 403);
+    }
+
+    $schedules = Schedule::with(['subject', 'teacher.user'])
+        ->where('class_id', $student->class_id)
+        ->get()
+        ->groupBy('day_of_week');
+
+    return response()->json($schedules);
+}
 }

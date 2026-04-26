@@ -98,4 +98,33 @@ class GradeController extends Controller
 
         return response()->json($grades);
     }
+
+//get grades for parent view of their child
+    public function childGrades(Request $request, $studentId)
+{
+    $parent = $request->user()->parent;
+    if (!$parent) {
+        return response()->json(['message' => 'Unauthorized'], 403);
+    }
+
+    // Make sure this student is actually a child of this parent
+    $isChild = $parent->students()->where('students.id', $studentId)->exists();
+    if (!$isChild) {
+        return response()->json(['message' => 'This student is not your child'], 403);
+    }
+
+    $student = Student::find($studentId);
+    $currentEnrollment = $student->currentEnrollment;
+    if (!$currentEnrollment) {
+        return response()->json([]);
+    }
+
+    $grades = Grade::where('student_id', $studentId)
+        ->where('enrollment_id', $currentEnrollment->id)
+        ->with(['subject', 'teacher.user'])
+        ->latest()
+        ->get();
+
+    return response()->json($grades);
+}
 }

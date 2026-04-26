@@ -136,6 +136,8 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/parent/children', [ParentController::class, 'getChildren']);
         Route::get('/parent/recommendations', [ParentController::class, 'getRecommendations']);
         Route::post('/parent/recommendations', [ParentController::class, 'storeRecommendation']);
+        Route::get('/parent/children/{studentId}/grades', [GradeController::class, 'childGrades']);
+        Route::get('/parent/children/{studentId}/attendance', [AttendanceController::class, 'childAttendance']);
     });
 
     // Analytics
@@ -156,4 +158,8 @@ Route::middleware('auth:sanctum')->group(function () {
 
     // Feedback
     Route::apiResource('/feedback', FeedbackController::class);
+
+    //ai assistant
+    Route::get('/schedule/my', [ScheduleController::class, 'mySchedule']);
+
 });
