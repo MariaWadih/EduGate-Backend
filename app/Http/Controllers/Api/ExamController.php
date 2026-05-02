@@ -248,4 +248,45 @@ class ExamController extends Controller
 
         return response()->json($submission);
     }
+
+
+
+public function getExamsForParents(Request $request)
+{
+    $parent = $request->user()->parent;
+    if (!$parent) return response()->json(['message' => 'Unauthorized'], 403);
+
+    $studentId = $request->query('student_id');
+    $students = $parent->students()->with('user')->get();
+
+    if ($students->isEmpty()) {
+        return response()->json([]);
+    }
+
+    // Default to first child if no student_id provided
+    $student = $studentId
+        ? $students->firstWhere('id', $studentId)
+        : $students->first();
+
+    if (!$student) {
+        return response()->json(['message' => 'Student not found or not your child'], 403);
+    }
+
+    $exams = Exam::where('class_id', $student->class_id)
+        ->with(['subject', 'schoolClass', 'questions'])
+        ->get();
+
+    $exams->each(function ($exam) use ($student) {
+        $submission = ExamSubmission::where('exam_id', $exam->id)
+            ->where('student_id', $student->id)
+            ->latest()
+            ->first();
+
+        $exam->student_name = $student->user->name;
+        $exam->student_id = $student->id;
+        $exam->my_submission = $submission;
+    });
+
+    return response()->json($exams);
+}
 }

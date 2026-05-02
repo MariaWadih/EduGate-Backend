@@ -146,6 +146,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/parent/recommendations', [ParentController::class, 'storeRecommendation']);
         Route::get('/parent/children/{studentId}/grades', [GradeController::class, 'childGrades']);
         Route::get('/parent/children/{studentId}/attendance', [AttendanceController::class, 'childAttendance']);
+        Route::get('/parent/exams', [ExamController::class, 'getExamsforParents']);
     });
 
     // Analytics
