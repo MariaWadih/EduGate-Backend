@@ -12,46 +12,44 @@ use Illuminate\Support\Facades\Log;
 
 class AcademicController extends Controller
 {
-    public function storeGradeSubject(Request $request)
-    {
-        $request->validate([
-            'grade_name' => 'required|string',
-            'subject_name' => 'required|string',
-            'subject_code' => 'nullable|string',
-        ]);
+public function storeGradeSubject(Request $request)
+{
+    $request->validate([
+        'grade_name'   => 'required|string',
+        'subject_name' => 'required|string',
+        'subject_code' => 'nullable|string',
+        'teacher_id'   => 'required|exists:teachers,id', // add this
+    ]);
 
-        $subject = Subject::where('name', $request->subject_name)->first();
-        if ($subject) {
-            $subject->update(['code' => $request->subject_code]);
-        } else {
-            $subject = Subject::create([
-                'name' => $request->subject_name,
-                'code' => $request->subject_code
+    $subject = Subject::where('name', $request->subject_name)->first();
+    if ($subject) {
+        $subject->update(['code' => $request->subject_code]);
+    } else {
+        $subject = Subject::create([
+            'name' => $request->subject_name,
+            'code' => $request->subject_code
+        ]);
+    }
+
+    $classes = SchoolClass::where('name', $request->grade_name)->get();
+    if ($classes->isEmpty()) {
+        return response()->json(['message' => 'Grade not found'], 404);
+    }
+
+    // Use chosen teacher instead of Teacher::first()
+    $teacher = Teacher::findOrFail($request->teacher_id);
+
+    foreach ($classes as $class) {
+        if (!$class->subjects()->where('subject_id', $subject->id)->exists()) {
+            $class->subjects()->attach($subject->id, [
+                'teacher_id'       => $teacher->id,
+                'academic_year_id' => $class->academic_year_id
             ]);
         }
-
-        $classes = SchoolClass::where('name', $request->grade_name)->get();
-
-        if ($classes->isEmpty()) {
-            return response()->json(['message' => 'Grade not found'], 404);
-        }
-
-        $teacher = Teacher::first();
-        if (!$teacher) {
-            return response()->json(['message' => 'No teachers found in system'], 400);
-        }
-
-        foreach ($classes as $class) {
-            if (!$class->subjects()->where('subject_id', $subject->id)->exists()) {
-                $class->subjects()->attach($subject->id, [
-                    'teacher_id'       => $teacher->id,
-                    'academic_year_id' => $class->academic_year_id
-                ]);
-            }
-        }
-
-        return response()->json(['message' => 'Subject added successfully', 'subject' => $subject], 201);
     }
+
+    return response()->json(['message' => 'Subject added successfully', 'subject' => $subject], 201);
+}
 
 
     public function storeGrade(Request $request)

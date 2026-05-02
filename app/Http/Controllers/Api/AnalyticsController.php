@@ -24,7 +24,9 @@ class AnalyticsController extends Controller
 {
     public function adminOverview(Request $request)
     {
-        $yearId = $request->query('academic_year_id');
+            $yearId = $request->query('academic_year_id');
+
+
         
         $data = [
             'metrics' => [
@@ -196,28 +198,26 @@ class AnalyticsController extends Controller
     }
 
     // Helper functions
-    protected function getPerformanceTrend($yearId = null)
-    {
-        $query = Grade::select(DB::raw('date, avg(score) as avg_score'))
-            ->whereNotNull('date');
-            
-        if ($yearId) {
-            $query->whereHas('enrollment', function($q) use ($yearId) {
-                $q->where('academic_year_id', $yearId);
-            });
-        }
+protected function getPerformanceTrend($yearId = null)
+{
+    $query = Grade::select(DB::raw('term, avg(score) as avg_score'));
 
-        return $query->groupBy('date')
-            ->orderBy('date', 'asc')
-            ->take(10)
-            ->get()
-            ->map(function($item) {
-                return [
-                    'date' => $item->date,
-                    'avg_score' => round($item->avg_score, 2)
-                ];
-            });
+    if ($yearId) {
+        $query->whereHas('enrollment', function($q) use ($yearId) {
+            $q->where('academic_year_id', $yearId);
+        });
     }
+
+    return $query->groupBy('term')
+        ->orderBy('term', 'asc')
+        ->get()
+        ->map(function($item) {
+            return [
+                'date' => $item->term,
+                'avg_score' => round($item->avg_score, 2)
+            ];
+        });
+}
 
     protected function getStudentsByClassCount($yearId = null)
     {
@@ -325,53 +325,71 @@ class AnalyticsController extends Controller
             ->get();
     }
 
-    protected function getTopPerformingClasses($yearId = null)
-    {
-        $query = SchoolClass::query();
-        if ($yearId) {
-            $query->where('academic_year_id', $yearId);
-        }
-
-        return $query->with(['students.grades'])
-            ->get()
-            ->map(function($class) {
-                $scores = $class->students->flatMap->grades->pluck('score');
-                return [
-                    'name' => $class->name . ' ' . $class->section,
-                    'avg_score' => $scores->avg() ?: 0,
-                    'student_count' => $class->students->count()
-                ];
-            })
-            ->sortByDesc('avg_score')
-            ->take(3)
-            ->values();
+protected function getTopPerformingClasses($yearId = null)
+{
+    $query = SchoolClass::query();
+    if ($yearId) {
+        $query->where('academic_year_id', $yearId);
     }
 
-    protected function getBestStudents($yearId = null)
-    {
-        $query = Student::with(['user', 'grades', 'schoolClass']);
-        if ($yearId) {
-            $query->whereHas('enrollments', function($q) use ($yearId) {
-                $q->where('academic_year_id', $yearId);
-            });
-        }
+    return $query->with(['students.grades' => function($q) use ($yearId) {
+            if ($yearId) {
+                $q->whereHas('enrollment', function($eq) use ($yearId) {
+                    $eq->where('academic_year_id', $yearId);
+                });
+            }
+        }])
+        ->get()
+        ->map(function($class) {
+            $scores = $class->students
+                ->flatMap->grades
+                ->pluck('score')
+                ->filter();
 
-        return $query->get()
-            ->map(function($student) use ($yearId) {
-                $grades = $student->grades;
-                if ($yearId) {
-                    $grades = $grades->where('academic_year_id', $yearId);
-                }
-                return [
-                    'name' => $student->user->name,
-                    'gpa' => round($grades->avg('score') ?: 0, 2),
-                    'class' => $student->schoolClass ? $student->schoolClass->name . ' ' . $student->schoolClass->section : 'N/A'
-                ];
-            })
-            ->sortByDesc('gpa')
-            ->take(5)
-            ->values();
+            return [
+                'name' => $class->name . ' ' . $class->section,
+                'avg_score' => round($scores->avg() ?: 0, 2),
+                'student_count' => $class->students->count()
+            ];
+        })
+        ->sortByDesc('avg_score')
+        ->take(3)
+        ->values();
+}
+
+protected function getBestStudents($yearId = null)
+{
+    $query = Student::with(['user', 'schoolClass']);
+
+    if ($yearId) {
+        $query->whereHas('enrollments', function($q) use ($yearId) {
+            $q->where('academic_year_id', $yearId);
+        });
     }
+
+    return $query->get()
+        ->map(function($student) use ($yearId) {
+            $scores = Grade::where('student_id', $student->id)
+                ->when($yearId, function($q) use ($yearId) {
+                    $q->whereHas('enrollment', function($eq) use ($yearId) {
+                        $eq->where('academic_year_id', $yearId);
+                    });
+                })
+                ->pluck('score')
+                ->filter();
+
+            return [
+                'name' => $student->user->name,
+                'gpa' => round($scores->avg() ?: 0, 2),
+                'class' => $student->schoolClass
+                    ? $student->schoolClass->name . ' ' . $student->schoolClass->section
+                    : 'N/A'
+            ];
+        })
+        ->sortByDesc('gpa')
+        ->take(5)
+        ->values();
+}
 
     protected function getAttendanceByGrade()
     {

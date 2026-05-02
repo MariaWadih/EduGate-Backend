@@ -162,4 +162,40 @@ class AttendanceController extends Controller
             ->get()
     );
 }
+
+
+public function studentAttendance(Request $request, $studentId)
+{
+    // Make sure the teacher actually teaches this student's class
+    $teacher = $request->user()->teacher;
+    if (!$teacher) {
+        return response()->json(['message' => 'Unauthorized'], 403);
+    }
+
+    $student = Student::find($studentId);
+    if (!$student) {
+        return response()->json(['message' => 'Student not found'], 404);
+    }
+
+    // Verify this student belongs to one of the teacher's classes
+    $teachesThisStudent = $teacher->assignments()
+        ->where('class_id', $student->class_id)
+        ->exists();
+
+    if (!$teachesThisStudent) {
+        return response()->json(['message' => 'This student is not in your class'], 403);
+    }
+
+    $currentEnrollment = $student->currentEnrollment;
+    if (!$currentEnrollment) {
+        return response()->json([]);
+    }
+
+    return response()->json(
+        AttendanceRecord::where('student_id', $studentId)
+            ->where('enrollment_id', $currentEnrollment->id)
+            ->orderBy('date', 'desc')
+            ->get()
+    );
+}
 }

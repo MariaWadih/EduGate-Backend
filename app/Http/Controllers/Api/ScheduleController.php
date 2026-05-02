@@ -20,20 +20,76 @@ class ScheduleController extends Controller
     }
 
     public function store(Request $request)
-    {
-        $validated = $request->validate([
-            'class_id' => 'required|exists:classes,id',
-            'subject_id' => 'required|exists:subjects,id',
-            'teacher_id' => 'nullable|exists:teachers,id',
-            'day_of_week' => 'required|string',
-            'start_time' => 'required',
-            'end_time' => 'required',
-            'room' => 'nullable|string',
-        ]);
+{
+    $validated = $request->validate([
+        'class_id'    => 'required|exists:classes,id',
+        'subject_id'  => 'required|exists:subjects,id',
+        'teacher_id'  => 'nullable|exists:teachers,id',
+        'day_of_week' => 'required|string',
+        'start_time'  => 'required',
+        'end_time'    => 'required',
+        'room'        => 'nullable|string',
+    ]);
 
-        $schedule = Schedule::create($validated);
-        return response()->json($schedule->load(['subject', 'teacher', 'schoolClass']), 201);
+    // Auto-resolve teacher from class_subject_teacher if not provided
+    if (empty($validated['teacher_id'])) {
+        $assignment = \App\Models\ClassSubjectTeacher::where('class_id', $validated['class_id'])
+            ->where('subject_id', $validated['subject_id'])
+            ->first();
+
+        if ($assignment) {
+            $validated['teacher_id'] = $assignment->teacher_id;
+        }
     }
+
+    // Check 1: Room conflict
+    if (!empty($validated['room'])) {
+        $roomConflict = Schedule::where('room', $validated['room'])
+            ->where('day_of_week', $validated['day_of_week'])
+            ->where('start_time', $validated['start_time'])
+            ->where('end_time', $validated['end_time'])
+            ->exists();
+
+        if ($roomConflict) {
+            return response()->json([
+                'message' => "Room '{$validated['room']}' is already booked on {$validated['day_of_week']} from {$validated['start_time']} to {$validated['end_time']}."
+            ], 422);
+        }
+    }
+
+    // Check 2: Teacher conflict
+    if (!empty($validated['teacher_id'])) {
+        $teacherConflict = Schedule::where('teacher_id', $validated['teacher_id'])
+            ->where('day_of_week', $validated['day_of_week'])
+            ->where('start_time', $validated['start_time'])
+            ->where('end_time', $validated['end_time'])
+            ->exists();
+
+        if ($teacherConflict) {
+            $teacher = \App\Models\Teacher::with('user')->find($validated['teacher_id']);
+            $teacherName = $teacher?->user?->name ?? 'This teacher';
+            return response()->json([
+                'message' => "{$teacherName} already has a class on {$validated['day_of_week']} from {$validated['start_time']} to {$validated['end_time']}."
+            ], 422);
+        }
+    }
+
+    // Check 3: Class conflict
+    $classConflict = Schedule::where('class_id', $validated['class_id'])
+        ->where('day_of_week', $validated['day_of_week'])
+        ->where('start_time', $validated['start_time'])
+        ->where('end_time', $validated['end_time'])
+        ->exists();
+
+    if ($classConflict) {
+        return response()->json([
+            'message' => "This class section already has a subject scheduled on {$validated['day_of_week']} from {$validated['start_time']} to {$validated['end_time']}."
+        ], 422);
+    }
+
+    $schedule = Schedule::create($validated);
+    return response()->json($schedule->load(['subject', 'teacher', 'schoolClass']), 201);
+}
 
     public function show(Schedule $schedule)
     {

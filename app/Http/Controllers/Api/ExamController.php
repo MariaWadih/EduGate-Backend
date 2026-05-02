@@ -15,33 +15,31 @@ use Illuminate\Support\Facades\Storage;
 class ExamController extends Controller
 {
     public function index(Request $request)
-    {
-        $user = $request->user();
-        $query = Exam::query()->with(['subject', 'teacher.user', 'schoolClass']);
+{
+    $user = $request->user();
 
-        if ($user->role === 'student') {
-            $student = $user->student;
-            $currentEnrollment = $student->currentEnrollment;
+    $exams = Exam::with(['subject'])->get();
 
-            if (!$currentEnrollment) {
-                return response()->json([]);
+    // ✅ ONLY apply this for students
+    if ($user->role === 'student') {
+        $studentId = $user->student->id;
+
+        $exams->load([
+            'submissions' => function ($q) use ($studentId) {
+                $q->where('student_id', $studentId)
+                  ->latest()
+                  ->limit(1);
             }
-            
-            // Show all exams belonging to the student's CURRENT class context
-            $query->where('class_id', $currentEnrollment->class_id);
-            
-            // Include student's submission if exists for this specific enrollment
-            $query->with(['submissions' => function($q) use ($student, $currentEnrollment) {
-                $q->where('student_id', $student->id)
-                  ->where('enrollment_id', $currentEnrollment->id);
-            }]);
-        } elseif ($user->role === 'teacher') {
-            $query->where('teacher_id', $user->teacher->id);
-            $query->with('questions');
-        }
+        ]);
 
-        return response()->json($query->latest()->get());
+        $exams->each(function ($exam) {
+            $exam->setRelation('my_submission', $exam->submissions->first());
+            unset($exam->submissions); // optional cleanup
+        });
     }
+
+    return response()->json($exams);
+}
 
     public function store(Request $request)
     {
@@ -115,7 +113,10 @@ class ExamController extends Controller
                 return response()->json(['message' => 'Exam has not started yet.'], 403);
             }
             // Include/Create submission
-            $submission = $exam->submissions()->where('student_id', $user->student->id)->first();
+            $submission = $exam->submissions()
+    ->where('student_id', $user->student->id)
+    ->latest()
+    ->first();
             $exam->setRelation('my_submission', $submission);
         }
 
@@ -239,10 +240,10 @@ class ExamController extends Controller
 
         $submission = ExamSubmission::findOrFail($validated['submission_id']);
         $submission->update([
-            'score' => $validated['score'],
-            'teacher_feedback' => $validated['teacher_feedback'],
-            'status' => 'graded',
-            'graded_at' => now(),
+            'score'            => $validated['score'],
+            'teacher_feedback' => $validated['teacher_feedback'] ?? null,
+            'status'           => 'graded',
+            'graded_at'        => now(),
         ]);
 
         return response()->json($submission);

@@ -37,6 +37,13 @@ Route::get('/health', function () {
     ]);
 });
 
+Route::get('/teachers/list', fn() => response()->json(
+    \App\Models\Teacher::with('user')->get()->map(fn($t) => [
+        'id'   => $t->id,
+        'name' => $t->user->name
+    ])
+));
+
 // Public — active academic year (needed before login for display)
 Route::get('/academic-years/active', [AcademicYearController::class, 'active']);
 
@@ -129,6 +136,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/announcements', [AnnouncementController::class, 'store']);
         Route::post('/materials', [MaterialController::class, 'store']);
         Route::delete('/materials/{id}', [MaterialController::class, 'destroy']);
+        Route::get('/attendance/student/{studentId}', [AttendanceController::class, 'studentAttendance']);
     });
 
     // Parent Specific
