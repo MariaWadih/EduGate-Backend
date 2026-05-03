@@ -171,4 +171,8 @@ Route::middleware('auth:sanctum')->group(function () {
     //ai assistant
     Route::get('/schedule/my', [ScheduleController::class, 'mySchedule']);
 
+Route::get('/promotions/classes',  [PromotionController::class, 'classesByYear']);
+Route::get('/promotions/preview',  [PromotionController::class, 'preview']);
+Route::post('/promotions/execute', [PromotionController::class, 'execute']);
+
 });

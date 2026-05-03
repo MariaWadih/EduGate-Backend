@@ -11,21 +11,36 @@ use Illuminate\Support\Facades\DB;
 
 class StudentController extends Controller
 {
-    public function index(Request $request)
-    {
-        $query = Student::with(['user', 'schoolClass', 'parents.user'])
-            ->withAvg('grades', 'score');
+   public function index(Request $request)
+{
+    $query = Student::with(['user', 'schoolClass', 'parents.user'])
+        ->withAvg(['grades' => fn($q) =>
+            $q->whereHas('enrollment.academicYear', fn($aq) =>
+                $aq->where('is_active', true)
+            )
+        ], 'score');
 
-        if ($request->has('academic_year_id')) {
-            $query->whereHas('schoolClass', function ($q) use ($request) {
-                $q->where('academic_year_id', $request->academic_year_id);
-            });
-        } elseif ($request->has('academic_year')) {
-            $query->where('current_academic_year', $request->academic_year);
-        }
-
-        return $query->get();
+    if ($request->has('academic_year_id')) {
+        $query->whereHas('schoolClass', function ($q) use ($request) {
+            $q->where('academic_year_id', $request->academic_year_id);
+        });
+    } elseif ($request->has('academic_year')) {
+        $query->where('current_academic_year', $request->academic_year);
     }
+
+    return $query->get();
+}
+
+public function show($id)
+{
+    return Student::with(['user', 'schoolClass', 'parents.user', 'grades.subject'])
+        ->withAvg(['grades' => fn($q) =>
+            $q->whereHas('enrollment.academicYear', fn($aq) =>
+                $aq->where('is_active', true)
+            )
+        ], 'score')
+        ->findOrFail($id);
+}
 
     public function store(Request $request)
     {
@@ -68,12 +83,7 @@ class StudentController extends Controller
         });
     }
 
-    public function show($id)
-    {
-        return Student::with(['user', 'schoolClass', 'parents.user', 'grades.subject'])
-            ->withAvg('grades', 'score')
-            ->findOrFail($id);
-    }
+
 
     public function update(Request $request, $id)
     {

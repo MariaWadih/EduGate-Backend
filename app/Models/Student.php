@@ -30,10 +30,24 @@ class Student extends Model
         return $this->hasMany(StudentEnrollment::class);
     }
 
-    public function currentEnrollment()
-    {
-        return $this->hasOne(StudentEnrollment::class)->where('status', 'active');
-    }
+// Remove both, replace with this single one
+public function currentEnrollment()
+{
+    return $this->hasOne(StudentEnrollment::class)
+        ->whereHas('academicYear', fn($q) => $q->where('is_active', true))
+        ->where('status', 'active')
+        ->latestOfMany('enrollment_date');
+}
+
+public function currentGrades()
+{
+    return $this->hasManyThrough(
+        Grade::class,
+        StudentEnrollment::class,
+        'student_id',
+        'enrollment_id'
+    )->whereHas('enrollment.academicYear', fn($q) => $q->where('is_active', true));
+}
 
     public function attendance()
     {

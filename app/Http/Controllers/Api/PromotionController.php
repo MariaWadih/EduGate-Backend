@@ -3,303 +3,214 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
-use App\Models\Student;
-use App\Models\SchoolClass;
 use App\Models\AcademicYear;
+use App\Models\SchoolClass;
+use App\Models\Student;
+use App\Models\StudentEnrollment;
 use App\Models\StudentPromotion;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
-use App\Models\StudentEnrollment;
-use App\Services\PromotionService;
-
 class PromotionController extends Controller
 {
-    protected $promotionService;
-
-    public function __construct(PromotionService $promotionService)
-    {
-        $this->promotionService = $promotionService;
-    }
     /**
-     * Get promotion candidates for a specific academic year and class
+     * GET /promotions/classes?year_id=X
      */
-    public function getCandidates(Request $request)
+    public function classesByYear(Request $request)
     {
-        $request->validate([
-            'from_academic_year' => 'required|string',
-            'to_academic_year' => 'required|string',
-            'from_class_id' => 'nullable|exists:classes,id'
-        ]);
+        $request->validate(['year_id' => 'required|exists:academic_years,id']);
 
-        $query = Student::with(['user', 'schoolClass', 'grades', 'examResults.exam'])
-            ->where('status', 'active') // Only Active students can be promoted
-            ->where('current_academic_year', $request->from_academic_year);
-
-        if ($request->from_class_id) {
-            $query->where('class_id', $request->from_class_id);
-        }
-
-        $students = $query->get()->map(function ($student) use ($request) {
-            $failed_academic = false;
-            $fail_reason = "";
-
-            // Check regular grades (must be > 50%)
-            foreach ($student->grades as $grade) {
-                $max = $grade->max_score ?: 100;
-                if (($grade->score / $max) < 0.5) {
-                    $failed_academic = true;
-                    $fail_reason = "Low grade in " . ($grade->subject->name ?? 'Subject');
-                    break;
-                }
-            }
-
-            // Check exam results (must be > 50%)
-            if (!$failed_academic) {
-                foreach ($student->examResults as $result) {
-                    $max = $result->exam->max_score ?: 100;
-                    if (($result->score / $max) < 0.5) {
-                        $failed_academic = true;
-                        $fail_reason = "Failed exam: " . ($result->exam->title ?? 'Exam');
-                        break;
-                    }
-                }
-            }
-
-            $currentGradeName = $student->schoolClass->name; // e.g. "Grade 10"
-            $status = $failed_academic ? 'retained' : 'promoted';
-            
-            // Detect Final Year (Grade 11) - case insensitive and flexible on spacing
-            $isFinalYear = preg_match('/Grade\s*11\b/i', $currentGradeName);
-
-            if ($status === 'promoted' && $isFinalYear) {
-                $status = 'graduated';
-            }
-
-            // Automation: Suggest Target Class
-            $targetClassId = null;
-            if ($status === 'promoted') {
-                // Find current grade number
-                if (preg_match('/Grade\s*(\d+)/i', $currentGradeName, $matches)) {
-                    $nextNum = intval($matches[1]) + 1;
-                    $nextGradeName = "Grade " . $nextNum;
-                    
-                    // Look for the next grade in the target year with the same section
-                    $targetClass = SchoolClass::where('name', 'LIKE', $nextGradeName . '%')
-                        ->where('section', $student->schoolClass->section)
-                        ->where('academic_year', $request->to_academic_year)
-                        ->first();
-                    $targetClassId = $targetClass?->id;
-                }
-            } elseif ($status === 'retained') {
-                // Repeating: same grade name, new year
-                $targetClass = SchoolClass::where('name', $currentGradeName)
-                    ->where('section', $student->schoolClass->section)
-                    ->where('academic_year', $request->to_academic_year)
-                    ->first();
-                $targetClassId = $targetClass?->id;
-            }
-            // If graduated, targetClassId remains null as they leave the system
-
-            $student->automated_status = $status;
-            $student->automated_target_class_id = $targetClassId;
-            $student->fail_reason = $fail_reason;
-            
-            return $student;
-        });
-
-        return response()->json([
-            'students' => $students,
-            'total' => $students->count()
-        ]);
-    }
-
-    /**
-     * Promote students to the next academic year
-     */
-    public function promoteStudents(Request $request)
-    {
-        $request->validate([
-            'from_academic_year' => 'required|string',
-            'to_academic_year' => 'required|string',
-            'promotions' => 'required|array',
-            'promotions.*.student_id' => 'required|exists:students,id',
-            'promotions.*.to_class_id' => 'nullable|exists:classes,id',
-            'promotions.*.status' => 'required|in:promoted,retained,graduated,transferred',
-            'promotions.*.remarks' => 'nullable|string'
-        ]);
-
-        $results = $this->promotionService->promoteStudents(
-            $request->promotions,
-            $request->from_academic_year,
-            $request->to_academic_year
-        );
-
-        return response()->json([
-            'message' => 'Promotion process completed',
-            'results' => $results
-        ]);
-    }
-
-    /**
-     * Get promotion history for a student
-     */
-    public function getStudentHistory($studentId)
-    {
-        $history = StudentPromotion::where('student_id', $studentId)
-            ->with(['fromClass', 'toClass'])
-            ->orderBy('promotion_date', 'desc')
-            ->get();
-
-        return response()->json($history);
-    }
-
-    /**
-     * Get promotion statistics for an academic year
-     */
-    public function getYearStatistics($academicYear)
-    {
-        $stats = StudentPromotion::where('from_academic_year', $academicYear)
-            ->select('status', DB::raw('count(*) as count'))
-            ->groupBy('status')
-            ->get()
-            ->pluck('count', 'status');
-
-        return response()->json([
-            'academic_year' => $academicYear,
-            'promoted' => $stats['promoted'] ?? 0,
-            'failed' => $stats['failed'] ?? 0,
-            'repeated' => $stats['repeated'] ?? 0,
-            'total' => $stats->sum()
-        ]);
-    }
-
-    /**
-     * Bulk promote entire class to next grade
-     */
-    public function bulkPromoteClass(Request $request)
-    {
-        $request->validate([
-            'from_class_id' => 'required|exists:classes,id',
-            'to_class_id' => 'required|exists:classes,id',
-            'from_academic_year' => 'required|string',
-            'to_academic_year' => 'required|string',
-            'retained_student_ids' => 'nullable|array',
-            'retained_student_ids.*' => 'exists:students,id'
-        ]);
-
-        $students = Student::where('class_id', $request->from_class_id)
-            ->where('current_academic_year', $request->from_academic_year)
-            ->get();
-
-        $retainedIds = $request->retained_student_ids ?? [];
-        $promotions = [];
-
-        foreach ($students as $student) {
-            $status = in_array($student->id, $retainedIds) ? 'retained' : 'promoted';
-            
-            $promotions[] = [
-                'student_id' => $student->id,
-                'to_class_id' => $status === 'retained' ? $request->from_class_id : $request->to_class_id,
-                'status' => $status,
-                'remarks' => $status === 'retained' ? 'Academic criteria not met' : 'Bulk promoted',
-                'from_class_id' => $request->from_class_id
-            ];
-        }
-
-        $results = $this->promotionService->promoteStudents($promotions, $request->from_academic_year, $request->to_academic_year);
-
-        return response()->json([
-            'message' => 'Bulk promotion completed',
-            'results' => $results
-        ]);
-    }
-
-    /**
-     * Copy class structure from source year to target year.
-     */
-    public function initializeTargetClasses(Request $request)
-    {
-        $request->validate([
-            'from_academic_year' => 'required|string',
-            'to_academic_year'   => 'required|string'
-        ]);
-
-        // Resolve target AcademicYear record (create it if it doesn't exist yet)
-        $targetYearRecord = AcademicYear::firstOrCreate(
-            ['name' => $request->to_academic_year],
-            [
-                'start_date' => substr($request->to_academic_year, 0, 4) . '-09-01',
-                'end_date'   => substr($request->to_academic_year, 5, 4) . '-06-30',
-                'is_active'  => false,
-                'status'     => 'upcoming',
-            ]
-        );
-
-        $sourceClasses = SchoolClass::where('academic_year', $request->from_academic_year)->get();
-
-        if ($sourceClasses->isEmpty()) {
-            return response()->json(['message' => 'No source classes found to replicate.'], 404);
-        }
-
-        $createdCount = 0;
-        foreach ($sourceClasses as $class) {
-            $exists = SchoolClass::where('name', $class->name)
-                ->where('section', $class->section)
-                ->where('academic_year', $request->to_academic_year)
-                ->exists();
-
-            if (!$exists) {
-                SchoolClass::create([
-                    'name'             => $class->name,
-                    'section'          => $class->section,
-                    'academic_year'    => $request->to_academic_year,
-                    'academic_year_id' => $targetYearRecord->id,
-                ]);
-                $createdCount++;
-            }
-        }
-
-        return response()->json([
-            'message'       => "Successfully initialized $createdCount classes for {$request->to_academic_year}.",
-            'created_count' => $createdCount
-        ]);
-    }
-
-    /**
-     * Get classes for a specific academic year string (used by the promotion dropdown).
-     */
-    public function getClassesForYear(Request $request)
-    {
-        $request->validate(['academic_year' => 'required|string']);
-
-        $classes = SchoolClass::where('academic_year', $request->academic_year)
+        $classes = SchoolClass::where('academic_year_id', $request->year_id)
+            ->orderBy('name')
+            ->orderBy('section')
             ->withCount('students')
-            ->get();
+            ->get(['id', 'name', 'section', 'academic_year', 'academic_year_id']);
 
         return response()->json($classes);
     }
 
     /**
-     * Find or create a class for students repeating the year.
+     * GET /promotions/preview?class_id=X&to_year_id=Y
      */
-    private function findRepeatClass($originalClass, $newAcademicYear)
+    public function preview(Request $request)
     {
-        $repeatClass = SchoolClass::where('name', $originalClass->name)
-            ->where('section', $originalClass->section)
-            ->where('academic_year', $newAcademicYear)
-            ->first();
+        $request->validate([
+            'class_id'   => 'required|exists:classes,id',
+            'to_year_id' => 'required|exists:academic_years,id',
+        ]);
 
-        if (!$repeatClass) {
-            $yearRecord = AcademicYear::where('name', $newAcademicYear)->first();
-            $repeatClass = SchoolClass::create([
-                'name'             => $originalClass->name,
-                'section'          => $originalClass->section,
-                'academic_year'    => $newAcademicYear,
-                'academic_year_id' => $yearRecord?->id,
-            ]);
+        $sourceClass = SchoolClass::findOrFail($request->class_id);
+        $toYear      = AcademicYear::findOrFail($request->to_year_id);
+
+        // Parse grade number from "Grade 5", "Grade 11", etc.
+        preg_match('/(\d+)/', $sourceClass->name, $m);
+        $currentGrade = isset($m[1]) ? (int)$m[1] : null;
+        $nextGrade    = $currentGrade ? $currentGrade + 1 : null;
+        $isFinalGrade = $currentGrade === 12;
+
+        // Find suggested next class: same section, next grade, in target year
+        $suggestedClass = null;
+        if ($nextGrade && !$isFinalGrade) {
+            $suggestedClass = SchoolClass::where('academic_year_id', $toYear->id)
+                ->where('name', 'Grade ' . $nextGrade)
+                ->where('section', $sourceClass->section)
+                ->first();
         }
 
-        return $repeatClass->id;
+        // All classes in target year for the dropdown
+        $targetYearClasses = SchoolClass::where('academic_year_id', $toYear->id)
+            ->orderBy('name')
+            ->orderBy('section')
+            ->get(['id', 'name', 'section']);
+
+        // Students currently in this class
+        $students = Student::where('class_id', $sourceClass->id)
+            ->where('status', 'active')
+            ->with('user')
+            ->get()
+            ->map(function ($student) use ($isFinalGrade, $suggestedClass, $toYear) {
+                $alreadyPromoted = StudentEnrollment::where('student_id', $student->id)
+                    ->where('academic_year_id', $toYear->id)
+                    ->exists();
+
+                return [
+                    'id'                 => $student->id,
+                    'name'               => $student->user->name,
+                    'suggested_status'   => $isFinalGrade ? 'graduated' : 'promoted',
+                    'suggested_class_id' => $suggestedClass?->id,
+                    'already_promoted'   => $alreadyPromoted,
+                ];
+            });
+
+        return response()->json([
+            'source_class' => [
+                'id'    => $sourceClass->id,
+                'label' => "{$sourceClass->name} – Section {$sourceClass->section}",
+                'grade' => $currentGrade,
+            ],
+            'target_year' => [
+                'id'   => $toYear->id,
+                'name' => $toYear->name,
+            ],
+            'is_final_grade'      => $isFinalGrade,
+            'suggested_class'     => $suggestedClass
+                ? ['id' => $suggestedClass->id, 'label' => "{$suggestedClass->name} – {$suggestedClass->section}"]
+                : null,
+            'target_year_classes' => $targetYearClasses,
+            'students'            => $students,
+        ]);
+    }
+
+    /**
+     * POST /promotions/execute
+     */
+    public function execute(Request $request)
+    {
+        $request->validate([
+            'from_class_id'          => 'required|exists:classes,id',
+            'to_academic_year_id'    => 'required|exists:academic_years,id',
+            'students'               => 'required|array|min:1',
+            'students.*.id'          => 'required|exists:students,id',
+            'students.*.status'      => 'required|in:promoted,retained,graduated',
+            'students.*.to_class_id' => 'nullable|exists:classes,id',
+        ]);
+
+        $fromClass = SchoolClass::findOrFail($request->from_class_id);
+        $toYear    = AcademicYear::findOrFail($request->to_academic_year_id);
+
+        $results = ['success' => [], 'skipped' => [], 'errors' => []];
+
+        DB::transaction(function () use ($request, $fromClass, $toYear, &$results) {
+            foreach ($request->students as $entry) {
+                $studentId = $entry['id'];
+                $status    = $entry['status'];
+                $toClassId = $entry['to_class_id'] ?? null;
+
+                // Non-graduated students must have a target class
+                if ($status !== 'graduated' && !$toClassId) {
+                    $results['errors'][] = [
+                        'id'     => $studentId,
+                        'reason' => 'No target class selected',
+                    ];
+                    continue;
+                }
+
+                // Skip if already has any enrollment in target year
+                $alreadyExists = StudentEnrollment::where('student_id', $studentId)
+                    ->where('academic_year_id', $toYear->id)
+                    ->exists();
+
+                if ($alreadyExists) {
+                    $results['skipped'][] = [
+                        'id'     => $studentId,
+                        'reason' => 'Already enrolled in target year',
+                    ];
+                    continue;
+                }
+
+                try {
+                    $student = Student::findOrFail($studentId);
+
+                    // Close ALL active enrollments for this student
+                    // (don't filter by class_id — avoids mismatch issues)
+                    StudentEnrollment::where('student_id', $studentId)
+                        ->where('status', 'active')
+                        ->update(['status' => 'promoted']);
+
+                    if ($status === 'graduated') {
+                        $student->update([
+                            'status'   => 'alumni',
+                            'class_id' => null,
+                        ]);
+                    } else {
+                        // Create new active enrollment in target year
+                        StudentEnrollment::create([
+                            'student_id'       => $studentId,
+                            'class_id'         => $toClassId,
+                            'academic_year_id' => $toYear->id,
+                            'academic_year'    => $toYear->name,
+                            'status'           => 'active',
+                            'enrollment_date'  => now(),
+                            'notes'            => $status === 'retained'
+                                ? 'Retained — repeated year'
+                                : 'Promoted from ' . $fromClass->name,
+                        ]);
+
+                        $student->update([
+                            'class_id'              => $toClassId,
+                            'current_academic_year' => $toYear->name,
+                        ]);
+                    }
+
+                    // Audit log
+                    StudentPromotion::create([
+                        'student_id'         => $studentId,
+                        'from_class_id'      => $fromClass->id,
+                        'to_class_id'        => $toClassId,
+                        'from_academic_year' => $fromClass->academic_year,
+                        'to_academic_year'   => $toYear->name,
+                        'status'             => $status,
+                        'promotion_date'     => now(),
+                    ]);
+
+                    $results['success'][] = $studentId;
+
+                } catch (\Exception $e) {
+                    $results['errors'][] = [
+                        'id'     => $studentId,
+                        'reason' => $e->getMessage(),
+                    ];
+                }
+            }
+        });
+
+        $successCount = count($results['success']);
+        $skippedCount = count($results['skipped']);
+        $errorCount   = count($results['errors']);
+
+        return response()->json([
+            'message' => "{$successCount} promoted, {$skippedCount} skipped, {$errorCount} failed.",
+            'results' => $results,
+        ], $errorCount > 0 && $successCount === 0 ? 422 : 200);
     }
 }

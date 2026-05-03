@@ -407,14 +407,17 @@ protected function getBestStudents($yearId = null)
             ->values();
     }
 
-    protected function getRegistrationTrend()
-    {
-        return User::select(DB::raw('strftime("%Y-%m", created_at) as month, count(*) as count'))
-            ->groupBy('month')
-            ->orderBy('month', 'asc')
-            ->take(6)
-            ->get();
-    }
+protected function getRegistrationTrend()
+{
+    return \App\Models\StudentEnrollment::select('academic_year', DB::raw('COUNT(DISTINCT student_id) as count'))
+        ->groupBy('academic_year')
+        ->orderBy('academic_year', 'asc')
+        ->get()
+        ->map(fn($item) => [
+            'academic_year' => $item->academic_year,
+            'count' => $item->count
+        ]);
+}
 
     protected function getFinanceOverview()
     {

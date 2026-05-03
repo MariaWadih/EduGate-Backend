@@ -11,30 +11,30 @@ use App\Models\ExamSubmission;
 use App\Models\Student;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
-
+use App\Models\AcademicYear;
 class ExamController extends Controller
 {
-    public function index(Request $request)
+public function index(Request $request)
 {
     $user = $request->user();
+    $activeYear = AcademicYear::active();
 
-    $exams = Exam::with(['subject'])->get();
+    $exams = Exam::with(['subject'])
+        ->whereHas('schoolClass', fn($q) => $q->where('academic_year_id', $activeYear->id))
+        ->get();
 
-    // ✅ ONLY apply this for students
     if ($user->role === 'student') {
         $studentId = $user->student->id;
 
         $exams->load([
             'submissions' => function ($q) use ($studentId) {
-                $q->where('student_id', $studentId)
-                  ->latest()
-                  ->limit(1);
+                $q->where('student_id', $studentId)->latest()->limit(1);
             }
         ]);
 
         $exams->each(function ($exam) {
             $exam->setRelation('my_submission', $exam->submissions->first());
-            unset($exam->submissions); // optional cleanup
+            unset($exam->submissions);
         });
     }
 
@@ -199,36 +199,37 @@ class ExamController extends Controller
         }
     }
 
-    public function getSubmissions($id)
-    {
-        $exam = Exam::findOrFail($id);
-        
-        // Get all students currently enrolled in this class
-        // (We look for students whose current class_id matches the exam's class_id)
-        $students = Student::where('class_id', $exam->class_id)
-            ->with(['user', 'currentEnrollment'])
-            ->get();
-            
-        // Get existing submissions for this exam, potentially filtered by enrollment if needed
-        $submissions = ExamSubmission::where('exam_id', $id)->get()->keyBy('student_id');
-        
-        // Map students to include their submission data
-        $results = $students->map(function($student) use ($submissions) {
-            $submission = $submissions->get($student->id);
-            return [
-                'student' => $student,
-                'id' => $submission ? $submission->id : null, // ID of the submission record
-                'status' => $submission ? $submission->status : 'pending',
-                'submitted_at' => $submission ? $submission->submitted_at : null,
-                'score' => $submission ? $submission->score : null,
-                'mcq_answers' => $submission ? $submission->mcq_answers : null,
-                'file_path' => $submission ? $submission->file_path : null,
-                'file_name' => $submission ? $submission->file_name : null,
-            ];
-        });
+   public function getSubmissions($id)
+{
+    $exam = Exam::findOrFail($id);
+    $activeYear = AcademicYear::active();
 
-        return response()->json($results);
-    }
+    // Scope students to those enrolled in the active year's class
+    $students = Student::where('class_id', $exam->class_id)
+        ->whereHas('currentEnrollment', fn($q) => 
+            $q->where('academic_year_id', $activeYear->id)
+        )
+        ->with(['user', 'currentEnrollment'])
+        ->get();
+
+    $submissions = ExamSubmission::where('exam_id', $id)->get()->keyBy('student_id');
+
+    $results = $students->map(function($student) use ($submissions) {
+        $submission = $submissions->get($student->id);
+        return [
+            'student'      => $student,
+            'id'           => $submission?->id,
+            'status'       => $submission?->status ?? 'pending',
+            'submitted_at' => $submission?->submitted_at,
+            'score'        => $submission?->score,
+            'mcq_answers'  => $submission?->mcq_answers,
+            'file_path'    => $submission?->file_path,
+            'file_name'    => $submission?->file_name,
+        ];
+    });
+
+    return response()->json($results);
+}
 
     public function gradeSubmission(Request $request)
     {
@@ -256,34 +257,37 @@ public function getExamsForParents(Request $request)
     $parent = $request->user()->parent;
     if (!$parent) return response()->json(['message' => 'Unauthorized'], 403);
 
+    $activeYear = AcademicYear::active();
     $studentId = $request->query('student_id');
     $students = $parent->students()->with('user')->get();
 
-    if ($students->isEmpty()) {
-        return response()->json([]);
-    }
+    if ($students->isEmpty()) return response()->json([]);
 
-    // Default to first child if no student_id provided
     $student = $studentId
         ? $students->firstWhere('id', $studentId)
         : $students->first();
 
-    if (!$student) {
-        return response()->json(['message' => 'Student not found or not your child'], 403);
-    }
+    if (!$student) return response()->json(['message' => 'Student not found or not your child'], 403);
 
-    $exams = Exam::where('class_id', $student->class_id)
+    // Get the student's class for the active year via their enrollment
+    $activeEnrollment = $student->enrollments()
+        ->where('academic_year_id', $activeYear->id)
+        ->where('status', 'active')
+        ->first();
+
+    if (!$activeEnrollment) return response()->json([]);
+
+    $exams = Exam::where('class_id', $activeEnrollment->class_id)
         ->with(['subject', 'schoolClass', 'questions'])
         ->get();
 
     $exams->each(function ($exam) use ($student) {
         $submission = ExamSubmission::where('exam_id', $exam->id)
             ->where('student_id', $student->id)
-            ->latest()
-            ->first();
+            ->latest()->first();
 
-        $exam->student_name = $student->user->name;
-        $exam->student_id = $student->id;
+        $exam->student_name  = $student->user->name;
+        $exam->student_id    = $student->id;
         $exam->my_submission = $submission;
     });
 
