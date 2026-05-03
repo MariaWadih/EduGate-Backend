@@ -19,10 +19,21 @@ public function index(Request $request)
     $user = $request->user();
     $activeYear = AcademicYear::active();
 
-    $exams = Exam::with(['subject'])
-        ->whereHas('schoolClass', fn($q) => $q->where('academic_year_id', $activeYear->id))
-        ->get();
+    $query = Exam::with(['subject', 'schoolClass'])
+        ->whereHas('schoolClass', function ($q) use ($activeYear) {
+            $q->where('academic_year_id', $activeYear->id);
+        });
 
+    // 🎯 Filter ONLY teacher exams
+    if ($user->role === 'teacher') {
+        $teacherId = $user->teacher->id;
+
+        $query->where('teacher_id', $teacherId);
+    }
+
+    $exams = $query->get();
+
+    // 🎯 Student logic (keep your existing logic)
     if ($user->role === 'student') {
         $studentId = $user->student->id;
 
@@ -292,5 +303,43 @@ public function getExamsForParents(Request $request)
     });
 
     return response()->json($exams);
+}
+
+
+
+public function destroy($id)
+{
+    $exam = Exam::findOrFail($id);
+
+    if (!auth()->check()) {
+        return response()->json(['message' => 'Unauthenticated'], 401);
+    }
+
+    $teacher = \App\Models\Teacher::where('user_id', auth()->id())->first();
+
+    if (!$teacher || $exam->teacher_id !== $teacher->id) {
+        return response()->json(['message' => 'Unauthorized'], 403);
+    }
+
+    // Prevent deleting if submissions exist (optional but smart)
+    if ($exam->submissions()->count() > 0) {
+        return response()->json([
+            'message' => 'Cannot delete exam with submissions'
+        ], 400);
+    }
+
+    if ($exam->type === 'file' && $exam->file_path) {
+        \Storage::delete($exam->file_path);
+    }
+
+    if ($exam->type === 'mcq') {
+        $exam->questions()->delete();
+    }
+
+    $exam->delete();
+
+    return response()->json([
+        'message' => 'Exam deleted successfully'
+    ]);
 }
 }

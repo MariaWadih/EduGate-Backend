@@ -137,6 +137,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/materials', [MaterialController::class, 'store']);
         Route::delete('/materials/{id}', [MaterialController::class, 'destroy']);
         Route::get('/attendance/student/{studentId}', [AttendanceController::class, 'studentAttendance']);
+        Route::delete('/exams/{id}', [ExamController::class, 'destroy']);
     });
 
     // Parent Specific
