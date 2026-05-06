@@ -24,36 +24,38 @@ class AnalyticsController extends Controller
 {
     public function adminOverview(Request $request)
     {
-            $yearId = $request->query('academic_year_id');
+        $yearId = $request->query('academic_year_id');
+        $term = $request->query('term');
+        $grade = $request->query('grade');
+        $segment = $request->query('segment');
 
-
-        
         $data = [
             'metrics' => [
-                'total_students' => $yearId ? \App\Models\StudentEnrollment::where('academic_year_id', $yearId)->count() : Student::count(),
+                'total_students' => $this->getFilteredStudentCount($yearId, $grade, $segment),
                 'total_teachers' => $yearId ? Teacher::whereHas('assignments', function($q) use ($yearId) {
                     $q->where('academic_year_id', $yearId);
                 })->count() : Teacher::count(),
                 'total_parents' => UserParent::count(),
-                'total_classes' => $yearId ? SchoolClass::where('academic_year_id', $yearId)->count() : SchoolClass::count(),
+                'total_classes' => $this->getFilteredClassCount($yearId, $grade),
                 'total_subjects' => $yearId ? \App\Models\ClassSubjectTeacher::where('academic_year_id', $yearId)->distinct('subject_id')->count() : \App\Models\Subject::count(),
-                'attendance_rate' => $this->getGlobalAttendanceRate($yearId),
-                'chronic_absenteeism' => Insight::where('insight_type', 'attendance')->where('severity', 'high')->count(),
+                'attendance_rate' => $this->getGlobalAttendanceRate($yearId, $term, $grade),
+                'proficiency_rate' => $this->getInstitutionalProficiencyRate($yearId, $grade),
                 'collection_rate' => $this->getFinanceOverview()['collection_rate'] ?? 0,
             ],
             'rankings' => [
-                'top_classes' => $this->getTopPerformingClasses($yearId),
-                'best_students' => $this->getBestStudents($yearId),
+                'top_classes' => $this->getTopPerformingClasses($yearId, $term, $grade),
+                'best_students' => $this->getBestStudents($yearId, $term, $grade, $segment),
             ],
             'charts' => [
-                'performance_trend' => $this->getPerformanceTrend($yearId),
-                'students_by_class' => $this->getStudentsByClassCount($yearId),
+                'performance_trend' => $this->getPerformanceTrend($yearId, $term, $grade),
+                'students_by_class' => $this->getStudentsByClassCount($yearId, $grade),
                 'registration_trend' => $this->getRegistrationTrend(),
             ],
             'insights' => Insight::latest()->take(5)->get(),
             'announcements' => Announcement::latest()->take(3)->get(),
             'feedback' => $this->getDynamicFeedback(),
             'computed_at' => now(),
+            'filters_applied' => compact('term', 'grade', 'segment')
         ];
 
         return response()->json($data);
@@ -198,54 +200,101 @@ class AnalyticsController extends Controller
     }
 
     // Helper functions
-protected function getPerformanceTrend($yearId = null)
-{
-    $query = Grade::select(DB::raw('term, avg(score) as avg_score'));
+    protected function getFilteredStudentCount($yearId, $grade = null, $segment = null)
+    {
+        if ($yearId) {
+            $query = \App\Models\StudentEnrollment::where('academic_year_id', $yearId);
+            
+            if ($grade) {
+                $query->whereHas('schoolClass', fn($q) => $q->where('name', $grade));
+            }
 
-    if ($yearId) {
-        $query->whereHas('enrollment', function($q) use ($yearId) {
-            $q->where('academic_year_id', $yearId);
-        });
+            if ($segment === 'High Performers') {
+                $query->whereHas('grades', fn($q) => $q->where('score', '>=', 90));
+            } elseif ($segment === 'At Risk') {
+                $query->whereHas('grades', fn($q) => $q->where('score', '<', 60));
+            }
+        } else {
+            $query = Student::query();
+            
+            if ($grade) {
+                $query->whereHas('schoolClass', fn($q) => $q->where('name', $grade));
+            }
+
+            if ($segment === 'High Performers') {
+                $query->whereHas('grades', fn($q) => $q->where('score', '>=', 90));
+            } elseif ($segment === 'At Risk') {
+                $query->whereHas('grades', fn($q) => $q->where('score', '<', 60));
+            }
+        }
+
+        return $query->count();
     }
 
-    return $query->groupBy('term')
-        ->orderBy('term', 'asc')
-        ->get()
-        ->map(function($item) {
-            return [
+    protected function getFilteredClassCount($yearId, $grade = null)
+    {
+        $query = SchoolClass::query();
+        if ($yearId) $query->where('academic_year_id', $yearId);
+        if ($grade) $query->where('name', $grade);
+        return $query->count();
+    }
+
+    protected function getPerformanceTrend($yearId = null, $term = null, $grade = null)
+    {
+        $query = Grade::select(DB::raw('term, avg(score) as avg_score'));
+
+        if ($yearId) {
+            $query->whereHas('enrollment', fn($q) => $q->where('academic_year_id', $yearId));
+        }
+
+        if ($term && $term !== 'All Terms') {
+            $query->where('term', 'like', "%$term%");
+        }
+
+        if ($grade) {
+            $query->whereHas('enrollment.schoolClass', fn($q) => $q->where('name', $grade));
+        }
+
+        return $query->groupBy('term')
+            ->orderBy('term', 'asc')
+            ->get()
+            ->map(fn($item) => [
                 'date' => $item->term,
                 'avg_score' => round($item->avg_score, 2)
-            ];
-        });
-}
+            ]);
+    }
 
-    protected function getStudentsByClassCount($yearId = null)
+    protected function getStudentsByClassCount($yearId = null, $grade = null)
     {
         $query = SchoolClass::withCount('students');
-        
+
         if ($yearId) {
             $query->where('academic_year_id', $yearId);
         }
 
+        if ($grade) {
+            $query->where('name', $grade);
+        }
+
         return $query->get()
-            ->map(function($class) {
-                return [
-                    'class_name' => $class->name . ' ' . $class->section,
-                    'count' => $class->students_count
-                ];
-            })
+            ->map(fn($class) => [
+                'class_name' => $class->name . ' ' . $class->section,
+                'count' => $class->students_count
+            ])
             ->sortByDesc('count')
             ->take(5)
             ->values();
     }
 
-    protected function getGlobalAttendanceRate($yearId = null)
+    protected function getGlobalAttendanceRate($yearId = null, $term = null, $grade = null)
     {
         $query = AttendanceRecord::query();
         if ($yearId) {
-            $query->whereHas('enrollment', function($q) use ($yearId) {
-                $q->where('academic_year_id', $yearId);
-            });
+            $query->whereHas('enrollment', fn($q) => $q->where('academic_year_id', $yearId));
+        }
+
+        if ($grade) {
+            $query->whereHas('schoolClass', fn($q) => $q->where('name', $grade));
         }
 
         $total = $query->count();
@@ -254,170 +303,121 @@ protected function getPerformanceTrend($yearId = null)
         return round(($present / $total) * 100, 2);
     }
 
-    protected function getAttendanceTrend()
+    protected function getTopPerformingClasses($yearId = null, $term = null, $grade = null)
     {
-        return AttendanceRecord::select(DB::raw('date, count(*) as total, sum(case when status="present" then 1 else 0 end) as present'))
-            ->groupBy('date')
-            ->orderBy('date', 'asc')
-            ->take(7)
-            ->get()
-            ->map(function($item) {
-                return [
-                    'date' => $item->date,
-                    'rate' => $item->total > 0 ? round(($item->present / $item->total) * 100, 2) : 0
-                ];
-            });
-    }
-
-    protected function getStudentAttendanceRate($studentId, $enrollmentId = null)
-    {
-        $query = AttendanceRecord::where('student_id', $studentId);
-        if ($enrollmentId) {
-            $query->where('enrollment_id', $enrollmentId);
+        $query = SchoolClass::query();
+        if ($yearId) {
+            $query->where('academic_year_id', $yearId);
         }
-        
-        $total = $query->count();
-        if ($total == 0) return 0;
-        
-        $present = (clone $query)->where('status', 'present')->count();
-        return round(($present / $total) * 100, 2);
-    }
-
-    protected function getStudentGPA($studentId, $enrollmentId = null)
-    {
-        $terms = ['Test 1', 'Test 2', 'Exam 1', 'Test 3', 'Exam 2'];
-        $query = Grade::where('student_id', $studentId)
-            ->whereIn('term', $terms);
-            
-        if ($enrollmentId) {
-            $query->where('enrollment_id', $enrollmentId);
+        if ($grade) {
+            $query->where('name', $grade);
         }
-        
-        $grades = $query->get();
-        if ($grades->isEmpty()) return 0;
 
-        // Group by subject, then calculate average across the 5 standard pillars for each subject
-        $subjectOverallScores = $grades->groupBy('subject_id')
-            ->map(function($subjectGrades) use ($terms) {
-                // Sum only the 5 pillars and divide by 5 as per standard evaluation structure
-                $sum = $subjectGrades->sum('score');
-                return $sum / count($terms);
-            });
-            
-        return round($subjectOverallScores->avg(), 1);
-    }
-
-    protected function getStudentAttendanceTrend($studentId, $enrollmentId = null)
-    {
-        $query = AttendanceRecord::where('student_id', $studentId);
-        if ($enrollmentId) {
-            $query->where('enrollment_id', $enrollmentId);
-        }
-        
-        return $query->orderBy('date', 'desc')
-            ->get(['date', 'status', 'remarks']);
-    }
-
-    protected function getGradeDistribution()
-    {
-        return Grade::select(DB::raw('score, count(*) as count'))
-            ->groupBy('score')
-            ->get();
-    }
-
-protected function getTopPerformingClasses($yearId = null)
-{
-    $query = SchoolClass::query();
-    if ($yearId) {
-        $query->where('academic_year_id', $yearId);
-    }
-
-    return $query->with(['students.grades' => function($q) use ($yearId) {
+        return $query->with(['students.grades' => function ($q) use ($yearId, $term) {
             if ($yearId) {
-                $q->whereHas('enrollment', function($eq) use ($yearId) {
-                    $eq->where('academic_year_id', $yearId);
-                });
+                $q->whereHas('enrollment', fn($eq) => $eq->where('academic_year_id', $yearId));
+            }
+            if ($term && $term !== 'All Terms') {
+                $q->where('term', 'like', "%$term%");
             }
         }])
-        ->get()
-        ->map(function($class) {
-            $scores = $class->students
-                ->flatMap->grades
-                ->pluck('score')
-                ->filter();
-
-            return [
-                'name' => $class->name . ' ' . $class->section,
-                'avg_score' => round($scores->avg() ?: 0, 2),
-                'student_count' => $class->students->count()
-            ];
-        })
-        ->sortByDesc('avg_score')
-        ->take(3)
-        ->values();
-}
-
-protected function getBestStudents($yearId = null)
-{
-    $query = Student::with(['user', 'schoolClass']);
-
-    if ($yearId) {
-        $query->whereHas('enrollments', function($q) use ($yearId) {
-            $q->where('academic_year_id', $yearId);
-        });
-    }
-
-    return $query->get()
-        ->map(function($student) use ($yearId) {
-            $scores = Grade::where('student_id', $student->id)
-                ->when($yearId, function($q) use ($yearId) {
-                    $q->whereHas('enrollment', function($eq) use ($yearId) {
-                        $eq->where('academic_year_id', $yearId);
-                    });
-                })
-                ->pluck('score')
-                ->filter();
-
-            return [
-                'name' => $student->user->name,
-                'gpa' => round($scores->avg() ?: 0, 2),
-                'class' => $student->schoolClass
-                    ? $student->schoolClass->name . ' ' . $student->schoolClass->section
-                    : 'N/A'
-            ];
-        })
-        ->sortByDesc('gpa')
-        ->take(5)
-        ->values();
-}
-
-    protected function getAttendanceByGrade()
-    {
-        return SchoolClass::with(['attendanceRecords'])
             ->get()
-            ->groupBy('name')
-            ->map(function($group, $gradeName) {
-                $total = $group->flatMap->attendanceRecords->count();
-                $present = $group->flatMap->attendanceRecords->where('status', 'present')->count();
+            ->map(function ($class) {
+                $scores = $class->students
+                    ->flatMap->grades
+                    ->pluck('score')
+                    ->filter();
+
                 return [
-                    'grade' => $gradeName,
-                    'rate' => $total > 0 ? round(($present / $total) * 100, 2) : 0
+                    'name' => $class->name . ' ' . $class->section,
+                    'avg_score' => round($scores->avg() ?: 0, 2),
+                    'student_count' => $class->students->count()
                 ];
             })
+            ->sortByDesc('avg_score')
+            ->take(3)
             ->values();
     }
 
-protected function getRegistrationTrend()
-{
-    return \App\Models\StudentEnrollment::select('academic_year', DB::raw('COUNT(DISTINCT student_id) as count'))
-        ->groupBy('academic_year')
-        ->orderBy('academic_year', 'asc')
-        ->get()
-        ->map(fn($item) => [
-            'academic_year' => $item->academic_year,
-            'count' => $item->count
-        ]);
-}
+    protected function getBestStudents($yearId = null, $term = null, $grade = null, $segment = null)
+    {
+        $query = Student::with(['user', 'schoolClass']);
+
+        if ($yearId) {
+            $query->whereHas('enrollments', fn($q) => $q->where('academic_year_id', $yearId));
+        }
+
+        if ($grade) {
+            $query->whereHas('schoolClass', fn($q) => $q->where('name', $grade));
+        }
+
+        if ($segment === 'High Performers') {
+            $query->whereHas('grades', fn($q) => $q->where('score', '>=', 90));
+        } elseif ($segment === 'At Risk') {
+            $query->whereHas('grades', fn($q) => $q->where('score', '<', 60));
+        }
+
+        return $query->get()
+            ->map(function ($student) use ($yearId, $term) {
+                $scores = Grade::where('student_id', $student->id)
+                    ->when($yearId, function ($q) use ($yearId) {
+                        $q->whereHas('enrollment', fn($eq) => $eq->where('academic_year_id', $yearId));
+                    })
+                    ->when($term && $term !== 'All Terms', function ($q) use ($term) {
+                        $q->where('term', 'like', "%$term%");
+                    })
+                    ->pluck('score')
+                    ->filter();
+
+                return [
+                    'name' => $student->user->name,
+                    'gpa' => round($scores->avg() ?: 0, 2),
+                    'class' => $student->schoolClass
+                        ? $student->schoolClass->name . ' ' . $student->schoolClass->section
+                        : 'N/A'
+                ];
+            })
+            ->sortByDesc('gpa')
+            ->take(5)
+            ->values();
+    }
+
+    protected function getRegistrationTrend()
+    {
+        return \App\Models\StudentEnrollment::select('academic_year', DB::raw('COUNT(DISTINCT student_id) as count'))
+            ->groupBy('academic_year')
+            ->orderBy('academic_year', 'asc')
+            ->get()
+            ->map(fn($item) => [
+                'academic_year' => $item->academic_year,
+                'count' => $item->count
+            ]);
+    }
+
+    protected function getInstitutionalProficiencyRate($yearId = null, $grade = null)
+    {
+        $query = Student::query();
+
+        if ($yearId) {
+            $query->whereHas('enrollments', fn($q) => $q->where('academic_year_id', $yearId));
+        }
+
+        if ($grade) {
+            $query->whereHas('schoolClass', fn($q) => $q->where('name', $grade));
+        }
+
+        $totalStudents = (clone $query)->count();
+        if ($totalStudents === 0) return 0;
+
+        // Count students whose average grade is >= 75
+        $proficientCount = $query->whereHas('grades', function ($q) {
+            $q->select(DB::raw('avg(score) as avg_score'))
+              ->groupBy('student_id')
+              ->havingRaw('avg(score) >= 75');
+        })->count();
+
+        return round(($proficientCount / $totalStudents) * 100, 1);
+    }
 
     protected function getFinanceOverview()
     {
