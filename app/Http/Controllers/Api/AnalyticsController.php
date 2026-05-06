@@ -67,20 +67,40 @@ class AnalyticsController extends Controller
         if (!$teacher) return response()->json(['error' => 'Teacher profile not found'], 404);
 
         // Real classes for this teacher
+        $activeYearId = \App\Models\AcademicYear::where('is_active', true)->value('id');
+
         $classes = SchoolClass::whereHas('subjects', function($q) use ($teacher) {
             $q->where('teacher_id', $teacher->id);
-        })->withCount('students')->get();
+        })
+        ->when($activeYearId, fn($q) => $q->where('academic_year_id', $activeYearId))
+        ->withCount('students')
+        ->get();
 
         // Pending grading (submissions with 'submitted' status)
         $pendingGrading = HomeworkSubmission::whereHas('homework', function($q) use ($teacher) {
             $q->where('teacher_id', $teacher->id);
         })->where('status', 'submitted')->with(['homework', 'student.user'])->get();
 
+$teacherHomework = \App\Models\Homework::where('teacher_id', $teacher->id)
+    ->when($activeYearId, function($q) use ($activeYearId) {
+        $q->whereHas('schoolClass', fn($sq) => $sq->where('academic_year_id', $activeYearId));
+    })
+    ->with(['schoolClass' => fn($q) => $q->withCount('students')])
+    ->get();
+
+$totalPossible = $teacherHomework->sum(fn($hw) => $hw->schoolClass?->students_count ?? 0);
+
+$totalSubmitted = \App\Models\HomeworkSubmission::whereIn('homework_id', $teacherHomework->pluck('id'))
+    ->whereIn('status', ['submitted', 'graded'])
+    ->count();
+
+$homeworkCompletion = $totalPossible > 0 ? round(($totalSubmitted / $totalPossible) * 100, 2) : 0;
+
         $data = [
             'metrics' => [
                 'class_attendance' => $this->getGlobalAttendanceRate(),
                 'at_risk_students' => Insight::whereIn('severity', ['high', 'medium'])->count(),
-                'homework_completion' => 65,
+                'homework_completion' => $homeworkCompletion,
             ],
             'classes' => $classes,
             'pending_grading' => $pendingGrading->take(4),
@@ -429,6 +449,31 @@ class AnalyticsController extends Controller
             'collection_rate' => $total > 0 ? round(($paid / $total) * 100, 2) : 0
         ];
     }
+
+    protected function getStudentAttendanceRate($studentId, $enrollmentId = null)
+{
+    $query = AttendanceRecord::where('student_id', $studentId);
+    if ($enrollmentId) $query->where('enrollment_id', $enrollmentId);
+    $total = $query->count();
+    if ($total === 0) return 0;
+    $present = (clone $query)->where('status', 'present')->count();
+    return round(($present / $total) * 100, 2);
+}
+
+protected function getStudentGPA($studentId, $enrollmentId = null)
+{
+    $query = Grade::where('student_id', $studentId);
+    if ($enrollmentId) $query->where('enrollment_id', $enrollmentId);
+    $avg = $query->avg('score');
+    return round($avg ?: 0, 2);
+}
+
+protected function getStudentAttendanceTrend($studentId, $enrollmentId = null)
+{
+    $query = AttendanceRecord::where('student_id', $studentId);
+    if ($enrollmentId) $query->where('enrollment_id', $enrollmentId);
+    return $query->orderBy('date', 'desc')->take(30)->get(['date', 'status']);
+}
 
     protected function getDynamicFeedback()
     {

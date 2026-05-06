@@ -122,6 +122,13 @@ class HomeworkController extends Controller
             return response()->json(['message' => 'Unauthorized'], 403);
         }
 
+
+        // Block overdue submissions
+        $homework = Homework::findOrFail($validated['homework_id']);
+        if ($homework->due_date && now()->gt($homework->due_date)) {
+            return response()->json(['message' => 'Submission deadline has passed.'], 422);
+        }
+
         $submission = HomeworkSubmission::where('homework_id', $validated['homework_id'])
             ->where('student_id', $student->id)
             ->first();
