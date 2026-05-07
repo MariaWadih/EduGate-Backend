@@ -16,161 +16,717 @@ use App\Models\UserParent;
 use App\Models\Announcement;
 use App\Models\SchoolClass;
 use App\Models\StudentPromotion;
+use App\Models\StudentEnrollment;
+use App\Models\AcademicYear;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Carbon\Carbon;
 
 class AnalyticsController extends Controller
 {
+    // ─────────────────────────────────────────────────────────────────────────
+    //  ADMIN OVERVIEW
+    // ─────────────────────────────────────────────────────────────────────────
+
     public function adminOverview(Request $request)
     {
-        $yearId = $request->query('academic_year_id');
-        $term = $request->query('term');
-        $grade = $request->query('grade');
-        $segment = $request->query('segment');
+        $yearId  = $request->query('academic_year_id');
+        $classId = $request->query('class_id');   // replaces old "grade" string filter
+        $segment = $request->query('segment');     // High Performers | At Risk | New Enrollees
+
+        // ── Dynamic filter options (sent once so frontend can populate dropdowns) ──
+        $filterOptions = [
+            'classes'  => $this->getClassOptions($yearId),
+            'segments' => ['All Students', 'High Performers', 'At Risk', 'New Enrollees'],
+        ];
 
         $data = [
             'metrics' => [
-                'total_students' => $this->getFilteredStudentCount($yearId, $grade, $segment),
-                'total_teachers' => $yearId ? Teacher::whereHas('assignments', function($q) use ($yearId) {
-                    $q->where('academic_year_id', $yearId);
-                })->count() : Teacher::count(),
-                'total_parents' => UserParent::count(),
-                'total_classes' => $this->getFilteredClassCount($yearId, $grade),
-                'total_subjects' => $yearId ? \App\Models\ClassSubjectTeacher::where('academic_year_id', $yearId)->distinct('subject_id')->count() : \App\Models\Subject::count(),
-                'attendance_rate' => $this->getGlobalAttendanceRate($yearId, $term, $grade),
-                'proficiency_rate' => $this->getInstitutionalProficiencyRate($yearId, $grade),
-                'collection_rate' => $this->getFinanceOverview()['collection_rate'] ?? 0,
+                'total_students'   => $this->getFilteredStudentCount($yearId, $classId, $segment),
+                'total_teachers'   => $this->getTeacherCount($yearId),
+                'total_classes'    => $this->getFilteredClassCount($yearId, $classId),
+                'total_subjects'   => $this->getSubjectCount($yearId),
+                'attendance_rate'  => $this->getGlobalAttendanceRate($yearId, $classId),
+                'proficiency_rate' => $this->getInstitutionalProficiencyRate($yearId, $classId),
+                'growth_index'     => $this->calculateGrowthIndex($yearId),
+                'retention_rate'   => $this->calculateRetentionRate($yearId),
             ],
             'rankings' => [
-                'top_classes' => $this->getTopPerformingClasses($yearId, $term, $grade),
-                'best_students' => $this->getBestStudents($yearId, $term, $grade, $segment),
+                'top_classes'       => $this->getTopPerformingClasses($yearId, $classId),
+                'best_students'     => $this->getBestStudents($yearId, $classId, $segment),
+                'subject_highlights'=> $this->getSubjectHighlights($yearId, $classId),
             ],
             'charts' => [
-                'performance_trend' => $this->getPerformanceTrend($yearId, $term, $grade),
-                'students_by_class' => $this->getStudentsByClassCount($yearId, $grade),
-                'registration_trend' => $this->getRegistrationTrend(),
+                'performance_trend'   => $this->getPerformanceTrend($yearId, $classId),
+                'students_by_class'   => $this->getStudentsByClassCount($yearId, $classId),
+                'registration_trend'  => $this->getRegistrationTrend(),
+                'subject_performance' => $this->getSubjectPerformance($yearId, $classId),
+                'grade_distribution'  => $this->getGradeDistribution($yearId, $classId),
+                'attendance_trend'    => $this->getWeeklyAttendanceTrend($yearId, $classId),
             ],
-            'insights' => Insight::latest()->take(5)->get(),
-            'announcements' => Announcement::latest()->take(3)->get(),
-            'feedback' => $this->getDynamicFeedback(),
-            'computed_at' => now(),
-            'filters_applied' => compact('term', 'grade', 'segment')
+            'operations' => [
+                'teacher_student_ratio' => $this->getTeacherStudentRatio($yearId),
+                'upcoming_year'         => $this->getUpcomingAcademicYear(),
+                'active_year_name'      => AcademicYear::where('id', $yearId)->value('name')
+                                          ?? AcademicYear::active()?->name
+                                          ?? 'N/A',
+            ],
+            'insights'       => Insight::latest()->take(5)->get(),
+            'announcements'  => Announcement::latest()->take(3)->get(),
+            'feedback'       => $this->getRealFeedback(),
+            'filter_options' => $filterOptions,
+            'computed_at'    => now(),
+            'filters_applied'=> compact('yearId', 'classId', 'segment'),
         ];
 
         return response()->json($data);
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  FILTER OPTIONS
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Return [{id, label}] list of classes for the given year (or all classes).
+     * Frontend uses this to populate the class filter dropdown dynamically.
+     */
+    private function getClassOptions($yearId): array
+    {
+        $query = SchoolClass::orderBy('name')->orderBy('section');
+        if ($yearId) {
+            $query->where('academic_year_id', $yearId);
+        }
+        return $query->get()
+            ->map(fn($c) => [
+                'id'    => $c->id,
+                'label' => trim($c->name . ' ' . $c->section),
+            ])
+            ->values()
+            ->toArray();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  METRIC HELPERS
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private function getTeacherCount($yearId): int
+    {
+        if ($yearId) {
+            return Teacher::whereHas('assignments', fn($q) =>
+                $q->where('academic_year_id', $yearId)
+            )->count();
+        }
+        return Teacher::count();
+    }
+
+    private function getSubjectCount($yearId): int
+    {
+        if ($yearId) {
+            return \App\Models\ClassSubjectTeacher::where('academic_year_id', $yearId)
+                ->distinct('subject_id')
+                ->count('subject_id');
+        }
+        return \App\Models\Subject::count();
+    }
+
+protected function calculateGrowthIndex($yearId): ?float
+{
+    $current = $this->getInstitutionalProficiencyRate($yearId, null);
+ 
+    $previousYear = $yearId
+        ? \App\Models\AcademicYear::where('id', '<', $yearId)->orderByDesc('id')->first()
+        : null;
+ 
+    // No previous year to compare against — growth is undefined, not 0
+    if (!$previousYear) return null;
+ 
+    $previous = $this->getInstitutionalProficiencyRate($previousYear->id, null);
+ 
+    return round($current - $previous, 1);
+}
+
+protected function calculateRetentionRate($yearId): ?float
+{
+    if (!$yearId) {
+        // No year context: ratio of students who have ANY enrollment vs total
+        $total  = \App\Models\Student::count();
+        $active = \App\Models\StudentEnrollment::distinct('student_id')->count('student_id');
+        if ($total === 0) return null;
+        return round(($active / $total) * 100, 1);
+    }
+ 
+    $previousYear = \App\Models\AcademicYear::where('id', '<', $yearId)
+        ->orderByDesc('id')
+        ->first();
+ 
+    // Only one academic year exists — cannot calculate retention
+    if (!$previousYear) return null;
+ 
+    $enrolledLastYear = \App\Models\StudentEnrollment::where('academic_year_id', $previousYear->id)
+        ->distinct('student_id')
+        ->count('student_id');
+ 
+    if ($enrolledLastYear === 0) return null;
+ 
+    $returnedThisYear = \App\Models\StudentEnrollment::where('academic_year_id', $yearId)
+        ->whereIn(
+            'student_id',
+            \App\Models\StudentEnrollment::where('academic_year_id', $previousYear->id)
+                ->pluck('student_id')
+        )
+        ->distinct('student_id')
+        ->count('student_id');
+ 
+    return round(($returnedThisYear / $enrolledLastYear) * 100, 1);
+}
+
+    private function getTeacherStudentRatio($yearId): string
+    {
+        $students = $this->getFilteredStudentCount($yearId, null, null);
+        $teachers = $this->getTeacherCount($yearId);
+        if ($teachers === 0) return 'N/A';
+        return '1:' . round($students / $teachers);
+    }
+
+    private function getUpcomingAcademicYear(): ?string
+    {
+        $upcoming = AcademicYear::where('is_active', false)
+            ->where('start_date', '>=', now())
+            ->orderBy('start_date')
+            ->first();
+        return $upcoming?->name;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  STUDENT COUNT / FILTERING
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * NOTE: The original migration's `attendance_records` and `grades` tables
+     * link directly to student_id + class_id, not enrollment_id. However,
+     * student_enrollments were added later and grades/attendance were patched
+     * to include enrollment_id. We use enrollment-based queries where possible
+     * and fall back to student-based queries where not.
+     */
+    protected function getFilteredStudentCount($yearId, $classId = null, $segment = null): int
+    {
+        if ($yearId) {
+            $query = StudentEnrollment::where('academic_year_id', $yearId);
+            if ($classId) {
+                $query->where('class_id', $classId);
+            }
+            $this->applySegmentToEnrollmentQuery($query, $segment, $yearId);
+            return $query->distinct('student_id')->count('student_id');
+        }
+
+        // No year context — query students table directly
+        $query = Student::query();
+        if ($classId) {
+            $query->where('class_id', $classId);
+        }
+        $this->applySegmentToStudentQuery($query, $segment);
+        return $query->count();
+    }
+
+    private function applySegmentToEnrollmentQuery($query, $segment, $yearId): void
+    {
+        match ($segment) {
+            'High Performers' => $query->whereHas('grades', fn($q) => $q->havingRaw('AVG(score) >= 85')),
+            'At Risk'         => $query->whereHas('grades', fn($q) => $q->havingRaw('AVG(score) < 60')),
+            'New Enrollees'   => $query->whereDoesntHave('student.enrollments', fn($q) =>
+                                    $q->where('academic_year_id', '<', $yearId)
+                                 ),
+            default           => null,
+        };
+    }
+
+    private function applySegmentToStudentQuery($query, $segment): void
+    {
+        match ($segment) {
+            'High Performers' => $query->whereHas('grades', fn($q) => $q->havingRaw('AVG(score) >= 85')),
+            'At Risk'         => $query->whereHas('grades', fn($q) => $q->havingRaw('AVG(score) < 60')),
+            default           => null,
+        };
+    }
+
+    protected function getFilteredClassCount($yearId, $classId = null): int
+    {
+        $query = SchoolClass::query();
+        if ($yearId)  $query->where('academic_year_id', $yearId);
+        if ($classId) $query->where('id', $classId);
+        return $query->count();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  ATTENDANCE
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * attendance_records links via student_id + class_id (original schema).
+     * If enrollment_id column exists (patched), we use it via the enrollment relationship.
+     * We handle both cases gracefully.
+     */
+    protected function getGlobalAttendanceRate($yearId = null, $classId = null): float
+    {
+        $query = AttendanceRecord::query();
+
+        if ($yearId) {
+            // Filter through enrollments to scope by academic year
+            $enrolledStudentIds = StudentEnrollment::where('academic_year_id', $yearId)
+                ->when($classId, fn($q) => $q->where('class_id', $classId))
+                ->pluck('student_id');
+            $query->whereIn('student_id', $enrolledStudentIds);
+        } elseif ($classId) {
+            $query->where('class_id', $classId);
+        }
+
+        $total = $query->count();
+        if ($total === 0) return 0;
+
+        $present = (clone $query)->where('status', 'present')->count();
+        return round(($present / $total) * 100, 2);
+    }
+
+    private function getWeeklyAttendanceTrend($yearId, $classId): array
+    {
+        // Determine which student IDs to scope
+        $studentIds = null;
+        if ($yearId) {
+            $studentIds = StudentEnrollment::where('academic_year_id', $yearId)
+                ->when($classId, fn($q) => $q->where('class_id', $classId))
+                ->pluck('student_id');
+        }
+
+        $dbDriver = DB::getDriverName();
+
+        if ($dbDriver === 'sqlite') {
+            $dayExpr  = "CAST(strftime('%w', date) AS INTEGER)";
+            $nameExpr = "CASE strftime('%w', date)
+                WHEN '1' THEN 'Mon' WHEN '2' THEN 'Tue' WHEN '3' THEN 'Wed'
+                WHEN '4' THEN 'Thu' WHEN '5' THEN 'Fri'
+                ELSE 'Other' END";
+        } else {
+            // MySQL / MariaDB
+            $dayExpr  = 'DAYOFWEEK(date)';
+            $nameExpr = "CASE DAYOFWEEK(date)
+                WHEN 2 THEN 'Mon' WHEN 3 THEN 'Tue' WHEN 4 THEN 'Wed'
+                WHEN 5 THEN 'Thu' WHEN 6 THEN 'Fri'
+                ELSE 'Other' END";
+        }
+
+        $query = AttendanceRecord::query()
+            ->selectRaw("$nameExpr as day, $dayExpr as day_order,
+                ROUND(AVG(CASE WHEN status = 'present' THEN 100.0 ELSE 0 END), 1) as rate")
+            ->whereRaw($dbDriver === 'sqlite'
+                ? "strftime('%w', date) NOT IN ('0','6')"
+                : 'DAYOFWEEK(date) NOT IN (1,7)')
+            ->groupByRaw($dbDriver === 'sqlite'
+                ? "strftime('%w', date)"
+                : 'DAYOFWEEK(date)')
+            ->orderByRaw($dbDriver === 'sqlite'
+                ? "strftime('%w', date)"
+                : 'DAYOFWEEK(date)');
+
+        if ($studentIds !== null) {
+            $query->whereIn('student_id', $studentIds);
+        }
+
+        return $query->get()->toArray();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  GRADES / PERFORMANCE
+    // ─────────────────────────────────────────────────────────────────────────
+
+protected function getInstitutionalProficiencyRate($yearId = null, $classId = null): float
+{
+    $enrollmentIds = $this->getEnrollmentIds($yearId, $classId);
+ 
+    // Build base query scoped to the right enrollments
+    $query = \App\Models\Grade::query()
+        ->select('student_id', \Illuminate\Support\Facades\DB::raw('AVG(score) as avg_score'))
+        ->groupBy('student_id');
+ 
+    if ($enrollmentIds !== null) {
+        if ($enrollmentIds->isEmpty()) return 0.0;
+        $query->whereIn('enrollment_id', $enrollmentIds);
+    }
+ 
+    // Pull averages into PHP and count — avoids the whereHas+havingRaw bug
+    $averages = $query->pluck('avg_score');
+ 
+    if ($averages->isEmpty()) return 0.0;
+ 
+    $total     = $averages->count();
+    $proficient = $averages->filter(fn($avg) => (float) $avg >= 75)->count();
+ 
+    return round(($proficient / $total) * 100, 1);
+}
+
+    protected function getPerformanceTrend($yearId = null, $classId = null): array
+    {
+        $enrollmentIds = $this->getEnrollmentIds($yearId, $classId);
+
+        $query = Grade::select('term', DB::raw('ROUND(AVG(score), 2) as avg_score'))
+            ->whereNotNull('term')
+            ->groupBy('term')
+            ->orderBy('term');
+
+        if ($enrollmentIds !== null) {
+            $query->whereIn('enrollment_id', $enrollmentIds);
+        }
+
+        return $query->get()
+            ->map(fn($item) => [
+                'date'      => $item->term,
+                'avg_score' => (float) $item->avg_score,
+            ])
+            ->toArray();
+    }
+
+    private function getSubjectPerformance($yearId, $classId): array
+    {
+        $enrollmentIds = $this->getEnrollmentIds($yearId, $classId);
+
+        $query = Grade::query()
+            ->join('subjects', 'grades.subject_id', '=', 'subjects.id')
+            ->selectRaw('subjects.name as subject, ROUND(AVG(grades.score), 1) as score')
+            ->groupBy('subjects.id', 'subjects.name')
+            ->orderByDesc('score');
+
+        if ($enrollmentIds !== null) {
+            $query->whereIn('grades.enrollment_id', $enrollmentIds);
+        }
+
+        return $query->get()->toArray();
+    }
+
+    private function getGradeDistribution($yearId, $classId): array
+    {
+        $enrollmentIds = $this->getEnrollmentIds($yearId, $classId);
+
+        $query = Grade::query();
+        if ($enrollmentIds !== null) {
+            $query->whereIn('enrollment_id', $enrollmentIds);
+        }
+
+        $scores = $query->pluck('score');
+
+        return [
+            ['name' => 'A (90-100)', 'value' => $scores->filter(fn($s) => $s >= 90)->count()],
+            ['name' => 'B (80-89)',  'value' => $scores->filter(fn($s) => $s >= 80 && $s < 90)->count()],
+            ['name' => 'C (70-79)',  'value' => $scores->filter(fn($s) => $s >= 70 && $s < 80)->count()],
+            ['name' => 'D (60-69)',  'value' => $scores->filter(fn($s) => $s >= 60 && $s < 70)->count()],
+            ['name' => 'F (<60)',    'value' => $scores->filter(fn($s) => $s < 60)->count()],
+        ];
+    }
+
+    private function getSubjectHighlights($yearId, $classId): array
+    {
+        $performance = collect($this->getSubjectPerformance($yearId, $classId));
+
+        if ($performance->isEmpty()) {
+            return ['best' => null, 'most_improved' => null, 'needs_attention' => null];
+        }
+
+        $best           = $performance->sortByDesc('score')->first();
+        $needsAttention = $performance->sortBy('score')->first();
+
+        $mostImproved = null;
+        $previousYear = $yearId
+            ? AcademicYear::where('id', '<', $yearId)->orderByDesc('id')->first()
+            : null;
+
+        if ($previousYear) {
+            $prevPerf = collect($this->getSubjectPerformance($previousYear->id, null))
+                ->keyBy('subject');
+
+            $mostImproved = $performance
+                ->map(function ($item) use ($prevPerf) {
+                    $prev = $prevPerf->get($item['subject']);
+                    $item['improvement'] = $prev ? $item['score'] - $prev['score'] : 0;
+                    return $item;
+                })
+                ->sortByDesc('improvement')
+                ->first();
+        }
+
+        return [
+            'best'           => $best           ? ['name' => $best['subject'],           'score'       => $best['score']]                               : null,
+            'most_improved'  => $mostImproved   ? ['name' => $mostImproved['subject'],   'improvement' => round($mostImproved['improvement'], 1)]       : null,
+            'needs_attention'=> $needsAttention ? ['name' => $needsAttention['subject'], 'score'       => $needsAttention['score']]                     : null,
+        ];
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  RANKINGS
+    // ─────────────────────────────────────────────────────────────────────────
+
+    protected function getTopPerformingClasses($yearId = null, $classId = null): array
+    {
+        $query = SchoolClass::query();
+        if ($yearId)  $query->where('academic_year_id', $yearId);
+        if ($classId) $query->where('id', $classId);
+
+        return $query->get()
+            ->map(function ($class) use ($yearId) {
+                $enrollmentIds = StudentEnrollment::where('class_id', $class->id)
+                    ->when($yearId, fn($q) => $q->where('academic_year_id', $yearId))
+                    ->pluck('id');
+
+                $avgScore = Grade::whereIn('enrollment_id', $enrollmentIds)->avg('score') ?? 0;
+
+                return [
+                    'name'          => trim($class->name . ' ' . $class->section),
+                    'avg_score'     => round($avgScore, 2),
+                    'student_count' => $enrollmentIds->count(),
+                ];
+            })
+            ->sortByDesc('avg_score')
+            ->take(5)
+            ->values()
+            ->toArray();
+    }
+
+    protected function getBestStudents($yearId = null, $classId = null, $segment = null): array
+    {
+        if ($yearId) {
+            $enrollmentQuery = StudentEnrollment::where('academic_year_id', $yearId)
+                ->with('student.user', 'schoolClass');
+            if ($classId) $enrollmentQuery->where('class_id', $classId);
+
+            $enrollments = $enrollmentQuery->get();
+
+            return $enrollments->map(function ($enrollment) use ($segment) {
+                $avgScore = Grade::where('enrollment_id', $enrollment->id)->avg('score') ?? 0;
+
+                if ($segment === 'High Performers' && $avgScore < 85) return null;
+                if ($segment === 'At Risk'         && $avgScore >= 60) return null;
+
+                return [
+                    'name'  => $enrollment->student?->user?->name ?? 'Unknown',
+                    'gpa'   => round($avgScore, 2),
+                    'class' => $enrollment->schoolClass
+                                ? trim($enrollment->schoolClass->name . ' ' . $enrollment->schoolClass->section)
+                                : 'N/A',
+                ];
+            })
+            ->filter()
+            ->sortByDesc('gpa')
+            ->take(5)
+            ->values()
+            ->toArray();
+        }
+
+        // No year: use students table
+        $query = Student::with(['user', 'schoolClass']);
+        if ($classId) $query->where('class_id', $classId);
+
+        return $query->get()
+            ->map(function ($student) use ($segment) {
+                $avgScore = Grade::where('student_id', $student->id)->avg('score') ?? 0;
+
+                if ($segment === 'High Performers' && $avgScore < 85) return null;
+                if ($segment === 'At Risk'         && $avgScore >= 60) return null;
+
+                return [
+                    'name'  => $student->user?->name ?? 'Unknown',
+                    'gpa'   => round($avgScore, 2),
+                    'class' => $student->schoolClass
+                                ? trim($student->schoolClass->name . ' ' . $student->schoolClass->section)
+                                : 'N/A',
+                ];
+            })
+            ->filter()
+            ->sortByDesc('gpa')
+            ->take(5)
+            ->values()
+            ->toArray();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  CHARTS
+    // ─────────────────────────────────────────────────────────────────────────
+
+    protected function getStudentsByClassCount($yearId = null, $classId = null): array
+    {
+        $query = SchoolClass::query();
+        if ($yearId)  $query->where('academic_year_id', $yearId);
+        if ($classId) $query->where('id', $classId);
+
+        return $query->get()
+            ->map(function ($class) use ($yearId) {
+                $count = StudentEnrollment::where('class_id', $class->id)
+                    ->when($yearId, fn($q) => $q->where('academic_year_id', $yearId))
+                    ->distinct('student_id')->count('student_id');
+                return [
+                    'class_name' => trim($class->name . ' ' . $class->section),
+                    'count'      => $count,
+                ];
+            })
+            ->sortByDesc('count')
+            ->take(7)
+            ->values()
+            ->toArray();
+    }
+
+    protected function getRegistrationTrend(): array
+    {
+        return StudentEnrollment::select('academic_year', DB::raw('COUNT(DISTINCT student_id) as count'))
+            ->groupBy('academic_year')
+            ->orderBy('academic_year', 'asc')
+            ->get()
+            ->map(fn($item) => [
+                'academic_year' => $item->academic_year,
+                'count'         => (int) $item->count,
+            ])
+            ->toArray();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  FEEDBACK — REAL ONLY, NO MOCK FALLBACK
+    // ─────────────────────────────────────────────────────────────────────────
+
+    protected function getRealFeedback(): array
+    {
+        return \App\Models\Feedback::with('user')
+            ->latest()
+            ->take(5)
+            ->get()
+            ->map(fn($f) => [
+                'name' => $f->user?->name   ?? 'Anonymous',
+                'role' => ucfirst($f->user?->role ?? 'user'),
+                'msg'  => $f->message,
+                'time' => $f->created_at->diffForHumans(),
+            ])
+            ->toArray();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  FINANCE
+    // ─────────────────────────────────────────────────────────────────────────
+
+    protected function getFinanceOverview(): array
+    {
+        $total = Payment::sum('amount');
+        $paid  = Payment::where('status', 'paid')->sum('amount');
+        return [
+            'total'           => $total,
+            'paid'            => $paid,
+            'collection_rate' => $total > 0 ? round(($paid / $total) * 100, 2) : 0,
+        ];
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  TEACHER OVERVIEW
+    // ─────────────────────────────────────────────────────────────────────────
 
     public function teacherOverview(Request $request)
     {
         $teacher = $request->user()->teacher;
         if (!$teacher) return response()->json(['error' => 'Teacher profile not found'], 404);
 
-        // Real classes for this teacher
-        $activeYearId = \App\Models\AcademicYear::where('is_active', true)->value('id');
+        $activeYearId = AcademicYear::where('is_active', true)->value('id');
 
-        $classes = SchoolClass::whereHas('subjects', function($q) use ($teacher) {
-            $q->where('teacher_id', $teacher->id);
-        })
-        ->when($activeYearId, fn($q) => $q->where('academic_year_id', $activeYearId))
-        ->withCount('students')
-        ->get();
+        $classes = SchoolClass::whereHas('subjects', fn($q) => $q->where('teacher_id', $teacher->id))
+            ->when($activeYearId, fn($q) => $q->where('academic_year_id', $activeYearId))
+            ->withCount('students')
+            ->get();
 
-        // Pending grading (submissions with 'submitted' status)
-        $pendingGrading = HomeworkSubmission::whereHas('homework', function($q) use ($teacher) {
-            $q->where('teacher_id', $teacher->id);
-        })->where('status', 'submitted')->with(['homework', 'student.user'])->get();
+        $pendingGrading = HomeworkSubmission::whereHas('homework', fn($q) =>
+                $q->where('teacher_id', $teacher->id)
+            )
+            ->where('status', 'submitted')
+            ->with(['homework', 'student.user'])
+            ->get();
 
-$teacherHomework = \App\Models\Homework::where('teacher_id', $teacher->id)
-    ->when($activeYearId, function($q) use ($activeYearId) {
-        $q->whereHas('schoolClass', fn($sq) => $sq->where('academic_year_id', $activeYearId));
-    })
-    ->with(['schoolClass' => fn($q) => $q->withCount('students')])
-    ->get();
+        $teacherHomework = Homework::where('teacher_id', $teacher->id)
+            ->when($activeYearId, fn($q) =>
+                $q->whereHas('schoolClass', fn($sq) => $sq->where('academic_year_id', $activeYearId))
+            )
+            ->with(['schoolClass' => fn($q) => $q->withCount('students')])
+            ->get();
 
-$totalPossible = $teacherHomework->sum(fn($hw) => $hw->schoolClass?->students_count ?? 0);
+        $totalPossible  = $teacherHomework->sum(fn($hw) => $hw->schoolClass?->students_count ?? 0);
+        $totalSubmitted = HomeworkSubmission::whereIn('homework_id', $teacherHomework->pluck('id'))
+            ->whereIn('status', ['submitted', 'graded'])
+            ->count();
 
-$totalSubmitted = \App\Models\HomeworkSubmission::whereIn('homework_id', $teacherHomework->pluck('id'))
-    ->whereIn('status', ['submitted', 'graded'])
-    ->count();
+        $homeworkCompletion = $totalPossible > 0
+            ? round(($totalSubmitted / $totalPossible) * 100, 2)
+            : 0;
 
-$homeworkCompletion = $totalPossible > 0 ? round(($totalSubmitted / $totalPossible) * 100, 2) : 0;
-
-        $data = [
+        return response()->json([
             'metrics' => [
-                'class_attendance' => $this->getGlobalAttendanceRate(),
-                'at_risk_students' => Insight::whereIn('severity', ['high', 'medium'])->count(),
+                'class_attendance'    => $this->getGlobalAttendanceRate(),
+                'at_risk_students'    => Insight::whereIn('severity', ['high', 'medium'])->count(),
                 'homework_completion' => $homeworkCompletion,
             ],
-            'classes' => $classes,
-            'pending_grading' => $pendingGrading->take(4),
-            'recent_activity' => Announcement::where('user_id', $request->user()->id)->latest()->take(5)->get(),
-            'provenance' => ['attendance_records', 'insights', 'homework_submissions', 'classes']
-        ];
-
-        return response()->json($data);
+            'classes'          => $classes,
+            'pending_grading'  => $pendingGrading->take(4),
+            'recent_activity'  => Announcement::where('user_id', $request->user()->id)->latest()->take(5)->get(),
+        ]);
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  STUDENT OVERVIEW
+    // ─────────────────────────────────────────────────────────────────────────
 
     public function studentOverview(Request $request)
     {
         $student = $request->user()->student;
         if (!$student) return response()->json(['error' => 'Student profile not found'], 404);
 
-        // Real upcoming exams (placeholder logic based on exams table)
+        $currentEnrollment = $student->currentEnrollment;
+        if (!$currentEnrollment) return response()->json(['error' => 'No active enrollment found'], 404);
+
         $exams = \App\Models\Exam::where('class_id', $student->class_id)
             ->where('date', '>=', now())
             ->with('subject')
             ->get();
 
-        // Real homework assignments
         $assignments = Homework::where('class_id', $student->class_id)
-            ->with(['subject', 'submissions' => function($q) use ($student) {
-                $q->where('student_id', $student->id);
-            }])
+            ->with(['subject', 'submissions' => fn($q) => $q->where('student_id', $student->id)])
             ->get();
 
-        // Add courses (subjects) with teachers
         $courses = \App\Models\ClassSubjectTeacher::where('class_id', $student->class_id)
             ->with(['subject', 'teacher.user'])
             ->get()
-            ->map(function($cst) {
-                return [
-                    'id' => $cst->subject ? $cst->subject->id : null,
-                    'name' => $cst->subject ? $cst->subject->name : 'Unknown Subject',
-                    'code' => $cst->subject ? $cst->subject->code : 'N/A',
-                    'teacher' => $cst->teacher
-                ];
-            });
+            ->map(fn($cst) => [
+                'id'      => $cst->subject?->id,
+                'name'    => $cst->subject?->name    ?? 'Unknown Subject',
+                'code'    => $cst->subject?->code    ?? 'N/A',
+                'teacher' => $cst->teacher,
+            ]);
 
-        // Real class schedules
         $schedules = \App\Models\Schedule::where('class_id', $student->class_id)
             ->with('subject')
             ->get();
 
-        $currentEnrollment = $student->currentEnrollment;
-        if (!$currentEnrollment) return response()->json(['error' => 'No active enrollment found'], 404);
-
-        $data = [
+        return response()->json([
             'metrics' => [
                 'attendance_rate' => $this->getStudentAttendanceRate($student->id, $currentEnrollment->id),
-                'gpa' => $this->getStudentGPA($student->id, $currentEnrollment->id),
+                'gpa'             => $this->getStudentGPA($student->id, $currentEnrollment->id),
             ],
             'attendance_trend' => $this->getStudentAttendanceTrend($student->id, $currentEnrollment->id),
-            'grades' => Grade::where('student_id', $student->id)->where('enrollment_id', $currentEnrollment->id)->with('subject')->latest()->get(),
-            'exams' => $exams,
+            'grades'      => Grade::where('student_id', $student->id)
+                                  ->where('enrollment_id', $currentEnrollment->id)
+                                  ->with('subject')->latest()->get(),
+            'exams'       => $exams,
             'assignments' => $assignments,
-            'schedules' => $schedules,
-            'insights' => Insight::where('related_entity_id', $student->id)->where('scope', 'student')->get(),
-            'courses' => $courses,
-            'provenance' => ['attendance_records', 'grades', 'insights', 'exams', 'homeworks', 'subjects', 'schedules']
-        ];
-
-        return response()->json($data);
+            'schedules'   => $schedules,
+            'insights'    => Insight::where('related_entity_id', $student->id)->where('scope', 'student')->get(),
+            'courses'     => $courses,
+        ]);
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  PARENT OVERVIEW
+    // ─────────────────────────────────────────────────────────────────────────
 
     public function parentOverview(Request $request)
     {
-        $parent = $request->user()->parent;
+        $parent    = $request->user()->parent;
         $studentId = $request->query('student_id');
 
         if (!$parent) return response()->json(['error' => 'Parent profile not found'], 404);
@@ -180,373 +736,121 @@ $homeworkCompletion = $totalPossible > 0 ? round(($totalSubmitted / $totalPossib
 
         $targetStudentId = $studentId ?: $students->first()->id;
 
-        // Verify ownership and activity
         if (!$students->pluck('id')->contains($targetStudentId)) {
             return response()->json(['error' => 'Unauthorized or student is inactive'], 403);
         }
 
-        $student = Student::with(['user', 'schoolClass', 'currentEnrollment'])->find($targetStudentId);
+        $student     = Student::with(['user', 'schoolClass', 'currentEnrollment'])->find($targetStudentId);
         $enrollmentId = $student->currentEnrollment?->id;
 
-        $data = [
+        return response()->json([
             'current_student' => [
-                'user' => $student->user,
-                'school_class' => $student->schoolClass,
+                'user'               => $student->user,
+                'school_class'       => $student->schoolClass,
                 'current_enrollment' => $student->currentEnrollment,
-                'grades' => Grade::where('student_id', $targetStudentId)
-                            ->when($enrollmentId, fn($q) => $q->where('enrollment_id', $enrollmentId))
-                            ->with('subject')
-                            ->get()
+                'grades'             => Grade::where('student_id', $targetStudentId)
+                                            ->when($enrollmentId, fn($q) => $q->where('enrollment_id', $enrollmentId))
+                                            ->with('subject')->get(),
             ],
             'metrics' => [
                 'attendance_rate' => $this->getStudentAttendanceRate($targetStudentId, $enrollmentId),
-                'gpa' => $this->getStudentGPA($targetStudentId, $enrollmentId),
+                'gpa'             => $this->getStudentGPA($targetStudentId, $enrollmentId),
             ],
-            'exams' => \App\Models\Exam::where('class_id', $student->class_id)->where('date', '>=', now())->get(),
-            'schedules' => \App\Models\Schedule::where('class_id', $student->class_id)->with('subject')->get(),
-            'attendance' => \App\Models\AttendanceRecord::where('student_id', $student->id)
-                            ->when($enrollmentId, fn($q) => $q->where('enrollment_id', $enrollmentId))
-                            ->latest()->take(30)->get(),
-            'assignments' => \App\Models\Homework::where('class_id', $student->class_id)
-                ->with(['subject', 'teacher.user', 'submissions' => function($q) use ($targetStudentId) {
-                    $q->where('student_id', $targetStudentId);
-                }])->get(),
+            'exams'         => \App\Models\Exam::where('class_id', $student->class_id)->where('date', '>=', now())->get(),
+            'schedules'     => \App\Models\Schedule::where('class_id', $student->class_id)->with('subject')->get(),
+            'attendance'    => AttendanceRecord::where('student_id', $student->id)
+                                ->when($enrollmentId, fn($q) => $q->where('enrollment_id', $enrollmentId))
+                                ->latest()->take(30)->get(),
+            'assignments'   => Homework::where('class_id', $student->class_id)
+                ->with(['subject', 'teacher.user', 'submissions' => fn($q) => $q->where('student_id', $targetStudentId)])
+                ->get(),
             'announcements' => Announcement::latest()->take(3)->get(),
-            'insights' => Insight::where('related_entity_id', $targetStudentId)->where('scope', 'student')->get(),
-            'provenance' => ['attendance_records', 'grades', 'insights', 'parent_student', 'schedules', 'homeworks']
-        ];
-
-        return response()->json($data);
+            'insights'      => Insight::where('related_entity_id', $targetStudentId)->where('scope', 'student')->get(),
+        ]);
     }
 
-    // Helper functions
-    protected function getFilteredStudentCount($yearId, $grade = null, $segment = null)
+    // ─────────────────────────────────────────────────────────────────────────
+    //  HISTORICAL RECORDS
+    // ─────────────────────────────────────────────────────────────────────────
+
+    public function getHistoricalRecords(Request $request)
     {
-        if ($yearId) {
-            $query = \App\Models\StudentEnrollment::where('academic_year_id', $yearId);
-            
-            if ($grade) {
-                $query->whereHas('schoolClass', fn($q) => $q->where('name', $grade));
-            }
+        $availableYears = StudentPromotion::select('from_academic_year')
+            ->distinct()->pluck('from_academic_year')->toArray();
 
-            if ($segment === 'High Performers') {
-                $query->whereHas('grades', fn($q) => $q->where('score', '>=', 90));
-            } elseif ($segment === 'At Risk') {
-                $query->whereHas('grades', fn($q) => $q->where('score', '<', 60));
-            }
-        } else {
-            $query = Student::query();
-            
-            if ($grade) {
-                $query->whereHas('schoolClass', fn($q) => $q->where('name', $grade));
-            }
+        $studentHistory  = Student::with(['user', 'schoolClass', 'parents.user'])
+            ->whereIn('status', ['active', 'unenrolled', 'alumni'])
+            ->get()->groupBy('status');
 
-            if ($segment === 'High Performers') {
-                $query->whereHas('grades', fn($q) => $q->where('score', '>=', 90));
-            } elseif ($segment === 'At Risk') {
-                $query->whereHas('grades', fn($q) => $q->where('score', '<', 60));
-            }
-        }
+        $teacherHistory  = Teacher::with('user')->get()->groupBy('status');
+        $promotionLogs   = StudentPromotion::with(['student.user', 'fromClass', 'toClass'])->latest()->get();
+        $promotionStats  = StudentPromotion::select('from_academic_year', 'status', DB::raw('count(*) as count'))
+            ->groupBy('from_academic_year', 'status')->get()->groupBy('from_academic_year');
 
-        return $query->count();
+        return response()->json([
+            'overview' => [
+                'total_alumni'         => Student::where('status', 'alumni')->count(),
+                'total_left_students'  => Student::where('status', 'unenrolled')->count(),
+                'total_left_teachers'  => Teacher::where('status', 'inactive')->count(),
+            ],
+            'students'       => [
+                'active'    => $studentHistory->get('active', []),
+                'unenrolled'=> $studentHistory->get('unenrolled', []),
+                'alumni'    => $studentHistory->get('alumni', []),
+            ],
+            'teachers'       => [
+                'active'   => $teacherHistory->get('active', []),
+                'inactive' => $teacherHistory->get('inactive', []),
+            ],
+            'promotions'     => $promotionStats,
+            'promotion_logs' => $promotionLogs,
+            'years'          => array_values(array_unique($availableYears)),
+        ]);
     }
 
-    protected function getFilteredClassCount($yearId, $grade = null)
+    // ─────────────────────────────────────────────────────────────────────────
+    //  STUDENT-LEVEL HELPERS
+    // ─────────────────────────────────────────────────────────────────────────
+
+    protected function getStudentAttendanceRate($studentId, $enrollmentId = null): float
     {
-        $query = SchoolClass::query();
-        if ($yearId) $query->where('academic_year_id', $yearId);
-        if ($grade) $query->where('name', $grade);
-        return $query->count();
-    }
-
-    protected function getPerformanceTrend($yearId = null, $term = null, $grade = null)
-    {
-        $query = Grade::select(DB::raw('term, avg(score) as avg_score'));
-
-        if ($yearId) {
-            $query->whereHas('enrollment', fn($q) => $q->where('academic_year_id', $yearId));
-        }
-
-        if ($term && $term !== 'All Terms') {
-            $query->where('term', 'like', "%$term%");
-        }
-
-        if ($grade) {
-            $query->whereHas('enrollment.schoolClass', fn($q) => $q->where('name', $grade));
-        }
-
-        return $query->groupBy('term')
-            ->orderBy('term', 'asc')
-            ->get()
-            ->map(fn($item) => [
-                'date' => $item->term,
-                'avg_score' => round($item->avg_score, 2)
-            ]);
-    }
-
-    protected function getStudentsByClassCount($yearId = null, $grade = null)
-    {
-        $query = SchoolClass::withCount('students');
-
-        if ($yearId) {
-            $query->where('academic_year_id', $yearId);
-        }
-
-        if ($grade) {
-            $query->where('name', $grade);
-        }
-
-        return $query->get()
-            ->map(fn($class) => [
-                'class_name' => $class->name . ' ' . $class->section,
-                'count' => $class->students_count
-            ])
-            ->sortByDesc('count')
-            ->take(5)
-            ->values();
-    }
-
-    protected function getGlobalAttendanceRate($yearId = null, $term = null, $grade = null)
-    {
-        $query = AttendanceRecord::query();
-        if ($yearId) {
-            $query->whereHas('enrollment', fn($q) => $q->where('academic_year_id', $yearId));
-        }
-
-        if ($grade) {
-            $query->whereHas('schoolClass', fn($q) => $q->where('name', $grade));
-        }
-
+        $query = AttendanceRecord::where('student_id', $studentId);
+        if ($enrollmentId) $query->where('enrollment_id', $enrollmentId);
         $total = $query->count();
-        if ($total == 0) return 0;
+        if ($total === 0) return 0;
         $present = (clone $query)->where('status', 'present')->count();
         return round(($present / $total) * 100, 2);
     }
 
-    protected function getTopPerformingClasses($yearId = null, $term = null, $grade = null)
+    protected function getStudentGPA($studentId, $enrollmentId = null): float
     {
-        $query = SchoolClass::query();
-        if ($yearId) {
-            $query->where('academic_year_id', $yearId);
-        }
-        if ($grade) {
-            $query->where('name', $grade);
-        }
-
-        return $query->with(['students.grades' => function ($q) use ($yearId, $term) {
-            if ($yearId) {
-                $q->whereHas('enrollment', fn($eq) => $eq->where('academic_year_id', $yearId));
-            }
-            if ($term && $term !== 'All Terms') {
-                $q->where('term', 'like', "%$term%");
-            }
-        }])
-            ->get()
-            ->map(function ($class) {
-                $scores = $class->students
-                    ->flatMap->grades
-                    ->pluck('score')
-                    ->filter();
-
-                return [
-                    'name' => $class->name . ' ' . $class->section,
-                    'avg_score' => round($scores->avg() ?: 0, 2),
-                    'student_count' => $class->students->count()
-                ];
-            })
-            ->sortByDesc('avg_score')
-            ->take(3)
-            ->values();
+        $query = Grade::where('student_id', $studentId);
+        if ($enrollmentId) $query->where('enrollment_id', $enrollmentId);
+        return round($query->avg('score') ?? 0, 2);
     }
 
-    protected function getBestStudents($yearId = null, $term = null, $grade = null, $segment = null)
+    protected function getStudentAttendanceTrend($studentId, $enrollmentId = null)
     {
-        $query = Student::with(['user', 'schoolClass']);
-
-        if ($yearId) {
-            $query->whereHas('enrollments', fn($q) => $q->where('academic_year_id', $yearId));
-        }
-
-        if ($grade) {
-            $query->whereHas('schoolClass', fn($q) => $q->where('name', $grade));
-        }
-
-        if ($segment === 'High Performers') {
-            $query->whereHas('grades', fn($q) => $q->where('score', '>=', 90));
-        } elseif ($segment === 'At Risk') {
-            $query->whereHas('grades', fn($q) => $q->where('score', '<', 60));
-        }
-
-        return $query->get()
-            ->map(function ($student) use ($yearId, $term) {
-                $scores = Grade::where('student_id', $student->id)
-                    ->when($yearId, function ($q) use ($yearId) {
-                        $q->whereHas('enrollment', fn($eq) => $eq->where('academic_year_id', $yearId));
-                    })
-                    ->when($term && $term !== 'All Terms', function ($q) use ($term) {
-                        $q->where('term', 'like', "%$term%");
-                    })
-                    ->pluck('score')
-                    ->filter();
-
-                return [
-                    'name' => $student->user->name,
-                    'gpa' => round($scores->avg() ?: 0, 2),
-                    'class' => $student->schoolClass
-                        ? $student->schoolClass->name . ' ' . $student->schoolClass->section
-                        : 'N/A'
-                ];
-            })
-            ->sortByDesc('gpa')
-            ->take(5)
-            ->values();
+        $query = AttendanceRecord::where('student_id', $studentId);
+        if ($enrollmentId) $query->where('enrollment_id', $enrollmentId);
+        return $query->orderBy('date', 'desc')->take(30)->get(['date', 'status']);
     }
 
-    protected function getRegistrationTrend()
+    // ─────────────────────────────────────────────────────────────────────────
+    //  SHARED UTILITY
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Returns a collection of enrollment IDs matching the given year/class filters,
+     * or null if no filters are set (meaning "all records, no scoping").
+     */
+    private function getEnrollmentIds($yearId, $classId): ?\Illuminate\Support\Collection
     {
-        return \App\Models\StudentEnrollment::select('academic_year', DB::raw('COUNT(DISTINCT student_id) as count'))
-            ->groupBy('academic_year')
-            ->orderBy('academic_year', 'asc')
-            ->get()
-            ->map(fn($item) => [
-                'academic_year' => $item->academic_year,
-                'count' => $item->count
-            ]);
-    }
+        if (!$yearId && !$classId) return null;
 
-    protected function getInstitutionalProficiencyRate($yearId = null, $grade = null)
-    {
-        $query = Student::query();
-
-        if ($yearId) {
-            $query->whereHas('enrollments', fn($q) => $q->where('academic_year_id', $yearId));
-        }
-
-        if ($grade) {
-            $query->whereHas('schoolClass', fn($q) => $q->where('name', $grade));
-        }
-
-        $totalStudents = (clone $query)->count();
-        if ($totalStudents === 0) return 0;
-
-        // Count students whose average grade is >= 75
-        $proficientCount = $query->whereHas('grades', function ($q) {
-            $q->select(DB::raw('avg(score) as avg_score'))
-              ->groupBy('student_id')
-              ->havingRaw('avg(score) >= 75');
-        })->count();
-
-        return round(($proficientCount / $totalStudents) * 100, 1);
-    }
-
-    protected function getFinanceOverview()
-    {
-        $total = \App\Models\Payment::sum('amount');
-        $paid = \App\Models\Payment::where('status', 'paid')->sum('amount');
-        return [
-            'total' => $total,
-            'paid' => $paid,
-            'collection_rate' => $total > 0 ? round(($paid / $total) * 100, 2) : 0
-        ];
-    }
-
-    protected function getStudentAttendanceRate($studentId, $enrollmentId = null)
-{
-    $query = AttendanceRecord::where('student_id', $studentId);
-    if ($enrollmentId) $query->where('enrollment_id', $enrollmentId);
-    $total = $query->count();
-    if ($total === 0) return 0;
-    $present = (clone $query)->where('status', 'present')->count();
-    return round(($present / $total) * 100, 2);
-}
-
-protected function getStudentGPA($studentId, $enrollmentId = null)
-{
-    $query = Grade::where('student_id', $studentId);
-    if ($enrollmentId) $query->where('enrollment_id', $enrollmentId);
-    $avg = $query->avg('score');
-    return round($avg ?: 0, 2);
-}
-
-protected function getStudentAttendanceTrend($studentId, $enrollmentId = null)
-{
-    $query = AttendanceRecord::where('student_id', $studentId);
-    if ($enrollmentId) $query->where('enrollment_id', $enrollmentId);
-    return $query->orderBy('date', 'desc')->take(30)->get(['date', 'status']);
-}
-
-    protected function getDynamicFeedback()
-    {
-        $feedbacks = \App\Models\Feedback::with('user')->latest()->take(5)->get();
-        
-        if ($feedbacks->isEmpty()) {
-            return [
-                ['name' => 'John Doe', 'role' => 'Student', 'msg' => 'The new assignment portal is much easier to use.', 'time' => '2 hours ago'],
-                ['name' => 'Jane Smith', 'role' => 'Teacher', 'msg' => 'I appreciate the quick response to my grading query.', 'time' => '5 hours ago'],
-                ['name' => 'Robert Brown', 'role' => 'Parent', 'msg' => 'The mobile app updates are very helpful for tracking attendance.', 'time' => '8 hours ago'],
-            ];
-        }
-
-        return $feedbacks->map(function($f) {
-            return [
-                'name' => $f->user->name,
-                'role' => ucfirst($f->user->role),
-                'msg' => $f->message,
-                'time' => $f->created_at->diffForHumans()
-            ];
-        });
-    }
-
-    public function getHistoricalRecords(Request $request)
-    {
-        // Get all unique academic years from promotions to populate filters
-        $availableYears = StudentPromotion::select('from_academic_year')
-            ->distinct()
-            ->pluck('from_academic_year')
-            ->toArray();
-            
-        if (empty($availableYears)) {
-            $availableYears = ['2023-2024', '2024-2025'];
-        }
-        
-        $studentHistory = Student::with(['user', 'schoolClass', 'parents.user'])
-            ->whereIn('status', ['active', 'unenrolled', 'alumni'])
-            ->get()
-            ->groupBy('status');
-
-        $teacherHistory = Teacher::with(['user'])
-            ->get()
-            ->groupBy('status');
-
-        $promotionLogs = StudentPromotion::with(['student.user', 'fromClass', 'toClass'])
-            ->latest()
-            ->get();
-
-        $promotionStats = StudentPromotion::select('from_academic_year', 'status', DB::raw('count(*) as count'))
-            ->groupBy('from_academic_year', 'status')
-            ->get()
-            ->groupBy('from_academic_year');
-
-        $data = [
-            'overview' => [
-                'total_alumni' => Student::where('status', 'alumni')->count(),
-                'total_left_students' => Student::where('status', 'unenrolled')->count(),
-                'total_left_teachers' => Teacher::where('status', 'inactive')->count(),
-            ],
-            'students' => [
-                'active' => $studentHistory->get('active', []),
-                'unenrolled' => $studentHistory->get('unenrolled', []),
-                'alumni' => $studentHistory->get('alumni', []),
-            ],
-            'teachers' => [
-                'active' => $teacherHistory->get('active', []),
-                'inactive' => $teacherHistory->get('inactive', []),
-            ],
-            'promotions' => $promotionStats,
-            'promotion_logs' => $promotionLogs,
-            'years' => array_values(array_unique(array_merge($availableYears, ['2023-2024', '2024-2025'])))
-        ];
-
-        return response()->json($data);
+        return StudentEnrollment::query()
+            ->when($yearId,  fn($q) => $q->where('academic_year_id', $yearId))
+            ->when($classId, fn($q) => $q->where('class_id', $classId))
+            ->pluck('id');
     }
 }

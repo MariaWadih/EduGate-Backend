@@ -123,11 +123,9 @@ class HomeworkController extends Controller
         }
 
 
-        // Block overdue submissions
+     
         $homework = Homework::findOrFail($validated['homework_id']);
-        if ($homework->due_date && now()->gt($homework->due_date)) {
-            return response()->json(['message' => 'Submission deadline has passed.'], 422);
-        }
+        $isLate = $homework->due_date && now()->gt($homework->due_date);
 
         $submission = HomeworkSubmission::where('homework_id', $validated['homework_id'])
             ->where('student_id', $student->id)
@@ -137,6 +135,7 @@ class HomeworkController extends Controller
             'content' => $validated['content'],
             'status' => 'submitted',
             'submitted_at' => now(),
+            'is_late'      => $isLate,
         ];
 
         if ($request->hasFile('file')) {
