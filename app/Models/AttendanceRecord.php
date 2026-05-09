@@ -6,7 +6,26 @@ use Illuminate\Database\Eloquent\Model;
 
 class AttendanceRecord extends Model
 {
-    protected $fillable = ['student_id', 'enrollment_id', 'class_id', 'date', 'status', 'remarks'];
+   protected $fillable = [
+    'student_id', 
+    'enrollment_id', 
+    'class_id', 
+    'subject_id',   // add
+    'teacher_id',   // add
+    'date', 
+    'status', 
+    'remarks'
+];
+
+public function subject()
+{
+    return $this->belongsTo(Subject::class);
+}
+
+public function teacher()
+{
+    return $this->belongsTo(Teacher::class);
+}
 
     public function enrollment()
     {

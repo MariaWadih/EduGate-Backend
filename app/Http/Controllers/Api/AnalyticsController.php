@@ -341,26 +341,30 @@ protected function calculateRetentionRate($yearId): ?float
 protected function getInstitutionalProficiencyRate($yearId = null, $classId = null): float
 {
     $enrollmentIds = $this->getEnrollmentIds($yearId, $classId);
- 
-    // Build base query scoped to the right enrollments
+
+    // Total enrolled students (denominator)
+    $totalStudents = \App\Models\StudentEnrollment::query()
+        ->when($yearId,  fn($q) => $q->where('academic_year_id', $yearId))
+        ->when($classId, fn($q) => $q->where('class_id', $classId))
+        ->distinct('student_id')
+        ->count('student_id');
+
+    if ($totalStudents === 0) return 0.0;
+
     $query = \App\Models\Grade::query()
         ->select('student_id', \Illuminate\Support\Facades\DB::raw('AVG(score) as avg_score'))
         ->groupBy('student_id');
- 
+
     if ($enrollmentIds !== null) {
         if ($enrollmentIds->isEmpty()) return 0.0;
         $query->whereIn('enrollment_id', $enrollmentIds);
     }
- 
-    // Pull averages into PHP and count — avoids the whereHas+havingRaw bug
-    $averages = $query->pluck('avg_score');
- 
-    if ($averages->isEmpty()) return 0.0;
- 
-    $total     = $averages->count();
-    $proficient = $averages->filter(fn($avg) => (float) $avg >= 75)->count();
- 
-    return round(($proficient / $total) * 100, 1);
+
+    $proficient = $query->pluck('avg_score')
+        ->filter(fn($avg) => (float) $avg >= 75)
+        ->count();
+
+    return round(($proficient / $totalStudents) * 100, 1);
 }
 
     protected function getPerformanceTrend($yearId = null, $classId = null): array
@@ -622,52 +626,108 @@ protected function getInstitutionalProficiencyRate($yearId = null, $classId = nu
     // ─────────────────────────────────────────────────────────────────────────
 
     public function teacherOverview(Request $request)
-    {
-        $teacher = $request->user()->teacher;
-        if (!$teacher) return response()->json(['error' => 'Teacher profile not found'], 404);
+{
+    $teacher = $request->user()->teacher;
+    if (!$teacher) return response()->json(['error' => 'Teacher profile not found'], 404);
 
-        $activeYearId = AcademicYear::where('is_active', true)->value('id');
+    $activeYearId = AcademicYear::where('is_active', true)->value('id');
 
-        $classes = SchoolClass::whereHas('subjects', fn($q) => $q->where('teacher_id', $teacher->id))
+    // Get only classes this teacher is assigned to
+    $classes = SchoolClass::whereHas('subjects', fn($q) => $q->where('teacher_id', $teacher->id))
+        ->when($activeYearId, fn($q) => $q->where('academic_year_id', $activeYearId))
+        ->withCount('students')
+        ->get();
+
+    // Get only subject IDs this teacher teaches
+    $teacherSubjectIds = \App\Models\ClassSubjectTeacher::where('teacher_id', $teacher->id)
+        ->when($activeYearId, fn($q) => $q->where('academic_year_id', $activeYearId))
+        ->pluck('subject_id');
+
+    $teacherClassIds = $classes->pluck('id');
+
+    // Filter by optional query params from frontend
+    $filteredClassId   = $request->query('class_id');
+    $filteredSubjectId = $request->query('subject_id');
+
+    // Attendance rate scoped to teacher's subjects only
+    $attendanceQuery = AttendanceRecord::whereIn('class_id', $teacherClassIds)
+        ->whereIn('subject_id', $teacherSubjectIds);
+
+    if ($filteredClassId)   $attendanceQuery->where('class_id', $filteredClassId);
+    if ($filteredSubjectId) $attendanceQuery->where('subject_id', $filteredSubjectId);
+
+    $total      = $attendanceQuery->count();
+    $present    = (clone $attendanceQuery)->where('status', 'present')->count();
+    $attendanceRate = $total > 0 ? round(($present / $total) * 100, 2) : 0;
+
+    $pendingGrading = \App\Models\HomeworkSubmission::whereHas('homework', fn($q) =>
+            $q->where('teacher_id', $teacher->id)
+        )
+        ->where('status', 'submitted')
+        ->with(['homework', 'student.user'])
+        ->get();
+
+$teacherHomework = \App\Models\Homework::where('teacher_id', $teacher->id)
+    ->when($activeYearId, fn($q) =>
+        $q->whereHas('schoolClass', fn($sq) => $sq->where('academic_year_id', $activeYearId))
+    )
+    ->when($filteredClassId, fn($q) => $q->where('class_id', $filteredClassId))     // add
+    ->when($filteredSubjectId, fn($q) => $q->where('subject_id', $filteredSubjectId)) // add
+    ->with(['schoolClass' => fn($q) => $q->withCount('students')])
+    ->get();
+
+    $totalPossible  = $teacherHomework->sum(fn($hw) => $hw->schoolClass?->students_count ?? 0);
+    $totalSubmitted = \App\Models\HomeworkSubmission::whereIn('homework_id', $teacherHomework->pluck('id'))
+        ->whereIn('status', ['submitted', 'graded'])
+        ->count();
+
+    $homeworkCompletion = $totalPossible > 0
+        ? round(($totalSubmitted / $totalPossible) * 100, 2)
+        : 0;
+
+    // Build subject list per class for frontend filters
+    $classesWithSubjects = $classes->map(function ($cls) use ($teacher, $activeYearId) {
+        $subjects = \App\Models\ClassSubjectTeacher::where('class_id', $cls->id)
+            ->where('teacher_id', $teacher->id)
             ->when($activeYearId, fn($q) => $q->where('academic_year_id', $activeYearId))
-            ->withCount('students')
-            ->get();
+            ->with('subject')
+            ->get()
+            ->map(fn($cst) => [
+                'id'   => $cst->subject?->id,
+                'name' => $cst->subject?->name,
+            ]);
 
-        $pendingGrading = HomeworkSubmission::whereHas('homework', fn($q) =>
-                $q->where('teacher_id', $teacher->id)
-            )
-            ->where('status', 'submitted')
-            ->with(['homework', 'student.user'])
-            ->get();
+        return [
+            'id'             => $cls->id,
+            'name'           => $cls->name,
+            'section'        => $cls->section,
+            'students_count' => $cls->students_count,
+            'subjects'       => $subjects,
+        ];
+    });
 
-        $teacherHomework = Homework::where('teacher_id', $teacher->id)
-            ->when($activeYearId, fn($q) =>
-                $q->whereHas('schoolClass', fn($sq) => $sq->where('academic_year_id', $activeYearId))
-            )
-            ->with(['schoolClass' => fn($q) => $q->withCount('students')])
-            ->get();
-
-        $totalPossible  = $teacherHomework->sum(fn($hw) => $hw->schoolClass?->students_count ?? 0);
-        $totalSubmitted = HomeworkSubmission::whereIn('homework_id', $teacherHomework->pluck('id'))
-            ->whereIn('status', ['submitted', 'graded'])
-            ->count();
-
-        $homeworkCompletion = $totalPossible > 0
-            ? round(($totalSubmitted / $totalPossible) * 100, 2)
-            : 0;
-
-        return response()->json([
-            'metrics' => [
-                'class_attendance'    => $this->getGlobalAttendanceRate(),
-                'at_risk_students'    => Insight::whereIn('severity', ['high', 'medium'])->count(),
-                'homework_completion' => $homeworkCompletion,
-            ],
-            'classes'          => $classes,
-            'pending_grading'  => $pendingGrading->take(4),
-            'recent_activity'  => Announcement::where('user_id', $request->user()->id)->latest()->take(5)->get(),
-        ]);
-    }
-
+    return response()->json([
+        'metrics' => [
+            'class_attendance'    => $attendanceRate,
+            'at_risk_students'    => \App\Models\Insight::whereIn('severity', ['high', 'medium'])->count(),
+            'homework_completion' => $homeworkCompletion,
+        ],
+        'classes'          => $classesWithSubjects,
+        'pending_grading'  => $pendingGrading->take(4),
+        'recent_activity'  => \App\Models\Announcement::where('user_id', $request->user()->id)->latest()->take(5)->get(),
+        'filter_options'   => [
+            'classes'  => $classesWithSubjects->map(fn($c) => ['id' => $c['id'], 'label' => $c['name'] . ' ' . $c['section']]),
+            'subjects' => \App\Models\ClassSubjectTeacher::where('teacher_id', $teacher->id)
+                ->when($activeYearId, fn($q) => $q->where('academic_year_id', $activeYearId))
+                ->when($filteredClassId, fn($q) => $q->where('class_id', $filteredClassId))
+                ->with('subject')
+                ->get()
+                ->map(fn($cst) => ['id' => $cst->subject?->id, 'name' => $cst->subject?->name])
+                ->unique('id')
+                ->values(),
+        ],
+    ]);
+}
     // ─────────────────────────────────────────────────────────────────────────
     //  STUDENT OVERVIEW
     // ─────────────────────────────────────────────────────────────────────────

@@ -13,12 +13,13 @@ class AttendanceController extends Controller
     public function store(Request $request)
     {
         $request->validate([
-            'class_id' => 'required|exists:classes,id',
-            'date' => 'required|date',
-            'records' => 'required|array',
-            'records.*.student_id' => 'required|exists:students,id',
-            'records.*.status' => 'required|in:present,absent,late,excused',
-            'records.*.remarks' => 'nullable|string'
+            'class_id'                 => 'required|exists:classes,id',
+            'subject_id'               => 'required|exists:subjects,id',  // add
+            'date'                     => 'required|date',
+            'records'                  => 'required|array',
+            'records.*.student_id'     => 'required|exists:students,id',
+            'records.*.status'         => 'required|in:present,absent,late,excused',
+            'records.*.remarks'        => 'nullable|string'
         ]);
 
         foreach ($request->records as $record) {
@@ -26,17 +27,19 @@ class AttendanceController extends Controller
             $currentEnrollment = $studentModel?->currentEnrollment;
 
             AttendanceRecord::updateOrCreate(
-                [
-                    'student_id' => $record['student_id'],
-                    'class_id' => $request->class_id,
-                    'date' => $request->date,
-                    'enrollment_id' => $currentEnrollment?->id, // Scope to enrollment
-                ],
-                [
-                    'status' => $record['status'],
-                    'remarks' => $record['remarks'] ?? null
-                ]
-            );
+            [
+                'student_id'    => $record['student_id'],
+                'class_id'      => $request->class_id,
+                'subject_id'    => $request->subject_id,        // add
+                'date'          => $request->date,
+                'enrollment_id' => $currentEnrollment?->id,
+            ],
+            [
+                'teacher_id' => $request->user()->teacher?->id, // add
+                'status'     => $record['status'],
+                'remarks'    => $record['remarks'] ?? null,
+            ]
+        );
 
             // Check for unexcused absences warning (More than 6 in a year)
             if ($record['status'] === 'absent' && (empty($record['remarks']) || trim($record['remarks']) === '')) {

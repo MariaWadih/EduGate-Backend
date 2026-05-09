@@ -14,12 +14,21 @@ class AcademicController extends Controller
 {
 public function storeGradeSubject(Request $request)
 {
+    Log::info('storeGradeSubject payload', $request->all()); // check laravel.log
+
     $request->validate([
         'grade_name'   => 'required|string',
         'subject_name' => 'required|string',
         'subject_code' => 'nullable|string',
-        'teacher_id'   => 'required|exists:teachers,id', // add this
+        'teacher_id'   => 'required|exists:teachers,id',
     ]);
+
+    $teacher = Teacher::findOrFail($request->teacher_id);
+    if ($teacher->status !== 'active') {
+        return response()->json([
+            'message' => 'Cannot assign an inactive teacher to a subject.'
+        ], 422);
+    }
 
     $subject = Subject::where('name', $request->subject_name)->first();
     if ($subject) {
@@ -36,9 +45,7 @@ public function storeGradeSubject(Request $request)
         return response()->json(['message' => 'Grade not found'], 404);
     }
 
-    // Use chosen teacher instead of Teacher::first()
-    $teacher = Teacher::findOrFail($request->teacher_id);
-
+    // $teacher already fetched above — no need to fetch again
     foreach ($classes as $class) {
         if (!$class->subjects()->where('subject_id', $subject->id)->exists()) {
             $class->subjects()->attach($subject->id, [
