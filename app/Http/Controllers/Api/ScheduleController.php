@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\Schedule;
 use Illuminate\Http\Request;
+use App\Models\Student;
 
 class ScheduleController extends Controller
 {
@@ -124,6 +125,24 @@ class ScheduleController extends Controller
     if (!$student) {
         return response()->json(['message' => 'Unauthorized'], 403);
     }
+
+    $schedules = Schedule::with(['subject', 'teacher.user'])
+        ->where('class_id', $student->class_id)
+        ->get()
+        ->groupBy('day_of_week');
+
+    return response()->json($schedules);
+}
+
+public function childSchedule(Request $request, $studentId)
+{
+    $parent = $request->user()->parent;
+    if (!$parent) return response()->json(['message' => 'Unauthorized'], 403);
+
+    $isChild = $parent->students()->where('students.id', $studentId)->exists();
+    if (!$isChild) return response()->json(['message' => 'Not your child'], 403);
+
+    $student = Student::find($studentId);
 
     $schedules = Schedule::with(['subject', 'teacher.user'])
         ->where('class_id', $student->class_id)

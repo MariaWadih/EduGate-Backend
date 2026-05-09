@@ -53,6 +53,8 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/me', [AuthController::class, 'me']);
     Route::put('/profile', [AuthController::class, 'updateProfile']);
 
+    Route::get('/subjects/my', [SubjectController::class, 'mySubjects']);
+
     // Admin Only
     Route::middleware('role:admin')->group(function () {
         Route::get('/teachers/past', [TeacherController::class, 'past']);
@@ -115,6 +117,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/materials', [MaterialController::class, 'index']);
         Route::get('/materials/download', [MaterialController::class, 'download']);
         Route::get('/materials/download-all', [MaterialController::class, 'downloadAllByCourse']);
+        
     });
 
     // Admin & Teacher
@@ -148,6 +151,8 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/parent/children/{studentId}/grades', [GradeController::class, 'childGrades']);
         Route::get('/parent/children/{studentId}/attendance', [AttendanceController::class, 'childAttendance']);
         Route::get('/parent/exams', [ExamController::class, 'getExamsforParents']);
+        Route::get('/parent/children/{studentId}/subjects', [SubjectController::class, 'childSubjects']);
+        Route::get('/parent/children/{studentId}/schedule', [ScheduleController::class, 'childSchedule']);
     });
 
     // Analytics
@@ -175,5 +180,8 @@ Route::middleware('auth:sanctum')->group(function () {
 Route::get('/promotions/classes',  [PromotionController::class, 'classesByYear']);
 Route::get('/promotions/preview',  [PromotionController::class, 'preview']);
 Route::post('/promotions/execute', [PromotionController::class, 'execute']);
+
+
+
 
 });
