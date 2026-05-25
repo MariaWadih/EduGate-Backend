@@ -26,7 +26,29 @@ class ClassController extends Controller
 
     public function show($id)
     {
-        return response()->json(SchoolClass::with(['students.user', 'students.parents.user', 'subjects'])->findOrFail($id));
+        $class = SchoolClass::with(['students.user', 'students.parents.user'])->findOrFail($id);
+
+        $user = request()->user();
+        if ($user?->role === 'teacher') {
+            $teacher = $user->teacher;
+            if (!$teacher) {
+                return response()->json(['message' => 'Unauthorized'], 403);
+            }
+
+            $class->load(['subjects' => function ($query) use ($teacher) {
+                $query->where('class_subject_teacher.teacher_id', $teacher->id);
+            }]);
+
+            if ($class->subjects->isEmpty()) {
+                return response()->json(['message' => 'This class is not assigned to you'], 403);
+            }
+
+            return response()->json($class);
+        }
+
+        $class->load('subjects');
+
+        return response()->json($class);
     }
 
     public function teacherClasses(Request $request)
@@ -37,9 +59,9 @@ class ClassController extends Controller
         $activeYearId = AcademicYear::where('is_active', true)->value('id');
 
         $classes = SchoolClass::whereHas('subjects', function($q) use ($teacher) {
-            $q->where('teacher_id', $teacher->id);
+            $q->where('class_subject_teacher.teacher_id', $teacher->id);
         })->with(['subjects' => function($q) use ($teacher) {
-            $q->where('teacher_id', $teacher->id);
+            $q->where('class_subject_teacher.teacher_id', $teacher->id);
         }, 'schedules'])
         ->when($activeYearId, fn($q) => $q->where('academic_year_id', $activeYearId))
         ->withCount('students')

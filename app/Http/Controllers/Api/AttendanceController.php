@@ -7,6 +7,7 @@ use App\Models\AttendanceRecord;
 use Illuminate\Http\Request;
 use Carbon\Carbon;
 use App\Models\Student;
+use App\Models\ClassSubjectTeacher;
 
 class AttendanceController extends Controller
 {
@@ -22,8 +23,20 @@ class AttendanceController extends Controller
             'records.*.remarks'        => 'nullable|string'
         ]);
 
+        $user = $request->user();
+        if ($user->role === 'teacher') {
+            $teacher = $user->teacher;
+            if (!$teacher || !$this->teacherTeachesClassSubject($teacher->id, $request->class_id, $request->subject_id)) {
+                return response()->json(['message' => 'You can only mark attendance for subjects and classes assigned to you'], 403);
+            }
+        }
+
         foreach ($request->records as $record) {
             $studentModel = \App\Models\Student::find($record['student_id']);
+            if (!$studentModel || (int) $studentModel->class_id !== (int) $request->class_id) {
+                return response()->json(['message' => 'Attendance records must match the selected class'], 422);
+            }
+
             $currentEnrollment = $studentModel?->currentEnrollment;
 
             AttendanceRecord::updateOrCreate(
@@ -130,10 +143,20 @@ class AttendanceController extends Controller
     {
         $request->validate([
              'class_id' => 'required',
+             'subject_id' => 'required',
              'date' => 'required|date'
         ]);
 
+        $user = $request->user();
+        if ($user->role === 'teacher') {
+            $teacher = $user->teacher;
+            if (!$teacher || !$this->teacherTeachesClassSubject($teacher->id, $request->class_id, $request->subject_id)) {
+                return response()->json(['message' => 'You can only view attendance for subjects and classes assigned to you'], 403);
+            }
+        }
+
         $records = AttendanceRecord::where('class_id', $request->class_id)
+                    ->where('subject_id', $request->subject_id)
                     ->where('date', $request->date)
                     ->get();
         return response()->json($records);
@@ -200,5 +223,13 @@ public function studentAttendance(Request $request, $studentId)
             ->orderBy('date', 'desc')
             ->get()
     );
+}
+
+private function teacherTeachesClassSubject($teacherId, $classId, $subjectId): bool
+{
+    return ClassSubjectTeacher::where('teacher_id', $teacherId)
+        ->where('class_id', $classId)
+        ->where('subject_id', $subjectId)
+        ->exists();
 }
 }
